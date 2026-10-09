@@ -1,0 +1,39 @@
+# ============================================
+# Sunday + Farway — Requirements
+# Python 3.12 required
+# ============================================
+
+# --- Core Voice & AI ---
+pywin32
+speechrecognition
+google-genai
+python-dotenv
+
+# --- PC Control ---
+pyautogui
+psutil
+pycaw
+comtypes
+pygetwindow
+pymsgbox
+mouseinfo
+pyrect
+pyscreeze
+pytweening
+
+# --- Music ---
+pywhatkit
+
+# --- File & System ---
+Pillow
+requests
+
+# --- Optional (Offline mode — Farway) ---
+# Uncomment below for offline mode
+ollama
+faster-whisper
+av
+numpy
+onnxruntime
+huggingface-hub
+tokenizers

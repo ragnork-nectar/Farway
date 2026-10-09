@@ -273,7 +273,9 @@ class CParser:
                     self._parse_error("Invalid multiple types specified", tn.coord)
                 else:
                     typ.type = tn
-                    return decl
+                    # Normalize atomic specifiers for declarations and type
+                    # names alike (casts, sizeof, unnamed parameters, etc.).
+                    return fix_atomic_specifiers(decl)
 
         if not typename:
             # Functions default to returning int
@@ -410,9 +412,6 @@ class CParser:
                 else:
                     self._add_identifier(fixed_decl.name, fixed_decl.coord)
 
-            fixed_decl = fix_atomic_specifiers(
-                cast(c_ast.Decl | c_ast.Typedef, fixed_decl)
-            )
             declarations.append(fixed_decl)
 
         return declarations
@@ -654,7 +653,7 @@ class CParser:
         if self._accept("SEMI"):
             return []
         if tok.type == "_STATIC_ASSERT":
-            return self._parse_static_assert()
+            return [self._parse_static_assert()]
 
         if not self._starts_declaration(tok):
             # Special handling for old-style function definitions that have an
@@ -728,7 +727,10 @@ class CParser:
     # line). When returning parsed declarations, a list is always returned -
     # even if it contains a single element.
     # ------------------------------------------------------------------
+    # BNF: declaration : decl_body ';' | static_assert
     def _parse_declaration(self) -> list[c_ast.Node]:
+        if self._peek_type() == "_STATIC_ASSERT":
+            return [self._parse_static_assert()]
         decls = self._parse_decl_body()
         self._expect("SEMI")
         return decls
@@ -1120,6 +1122,8 @@ class CParser:
     #                           | static_assert
     #                           | pppragma_directive
     def _parse_struct_declaration(self) -> list[c_ast.Node] | None:
+        if self._peek_type() == "_STATIC_ASSERT":
+            return [self._parse_static_assert()]
         if self._peek_type() == "SEMI":
             self._advance()
             return None
@@ -1548,8 +1552,8 @@ class CParser:
     # BNF: statement : labeled_statement | compound_statement
     #                | selection_statement | iteration_statement
     #                | jump_statement | expression_statement
-    #                | static_assert | pppragma_directive
-    def _parse_statement(self) -> c_ast.Node | list[c_ast.Node]:
+    #                | pppragma_directive
+    def _parse_statement(self) -> c_ast.Node:
         tok_type = self._peek_type()
         match tok_type:
             case "CASE" | "DEFAULT":
@@ -1566,13 +1570,11 @@ class CParser:
                 return self._parse_jump_statement()
             case "PPPRAGMA" | "_PRAGMA":
                 return self._parse_pppragma_directive()
-            case "_STATIC_ASSERT":
-                return self._parse_static_assert()
             case _:
                 return self._parse_expression_statement()
 
     # BNF: pragmacomp_or_statement : pppragma_directive* statement
-    def _parse_pragmacomp_or_statement(self) -> c_ast.Node | list[c_ast.Node]:
+    def _parse_pragmacomp_or_statement(self) -> c_ast.Node:
         if self._peek_type() in {"PPPRAGMA", "_PRAGMA"}:
             pragmas = self._parse_pppragma_directive_list()
             stmt = self._parse_statement()
@@ -1581,6 +1583,8 @@ class CParser:
 
     # BNF: block_item : declaration | statement
     def _parse_block_item(self) -> c_ast.Node | list[c_ast.Node]:
+        if self._peek_type() == "_STATIC_ASSERT":
+            return self._parse_static_assert()
         if self._starts_declaration():
             return self._parse_declaration()
         return self._parse_statement()
@@ -1687,7 +1691,7 @@ class CParser:
                 return c_ast.DoWhile(cond, stmt, self._tok_coord(tok))
             case "FOR":
                 self._expect("LPAREN")
-                if self._starts_declaration():
+                if self._peek_type() == "_STATIC_ASSERT" or self._starts_declaration():
                     decls = self._parse_declaration()
                     init = c_ast.DeclList(decls, self._tok_coord(tok))
                     cond = self._parse_expression_opt()
@@ -1929,7 +1933,7 @@ class CParser:
         return expr
 
     # BNF: primary_expression : ID | constant | string_literal
-    #                        | '(' expression ')' | offsetof
+    #                        | '(' expression ')' | generic_selection | offsetof
     def _parse_primary_expression(self) -> c_ast.Node:
         tok_type = self._peek_type()
         if tok_type == "ID":
@@ -1942,13 +1946,13 @@ class CParser:
             return self._parse_constant()
         if tok_type in _STRING_LITERAL:
             return self._parse_unified_string_literal()
-        if tok_type in _WSTR_LITERAL:
-            return self._parse_unified_wstring_literal()
         if tok_type == "LPAREN":
             self._advance()
             expr = self._parse_expression()
             self._expect("RPAREN")
             return expr
+        if tok_type == "_GENERIC":
+            return self._parse_generic_selection()
         if tok_type == "OFFSETOF":
             off_tok = self._advance()
             self._expect("LPAREN")
@@ -1964,6 +1968,30 @@ class CParser:
             )
 
         self._parse_error("Invalid expression", self.clex.filename)
+
+    # BNF: generic_selection : _GENERIC '(' assignment_expression ','
+    #                         generic_association (',' generic_association)* ')'
+    def _parse_generic_selection(self) -> c_ast.GenericSelection:
+        tok = self._expect("_GENERIC")
+        self._expect("LPAREN")
+        expr = self._parse_assignment_expression()
+        self._expect("COMMA")
+        associations = [self._parse_generic_association()]
+        while self._accept("COMMA"):
+            associations.append(self._parse_generic_association())
+        self._expect("RPAREN")
+        return c_ast.GenericSelection(expr, associations, self._tok_coord(tok))
+
+    # BNF: generic_association : type_name ':' assignment_expression
+    #                          | DEFAULT ':' assignment_expression
+    def _parse_generic_association(self) -> c_ast.GenericAssociation:
+        tok = self._peek()
+        if tok is None:
+            self._parse_error("At end of input", self.clex.filename)
+        typ = None if self._accept("DEFAULT") else self._parse_type_name()
+        self._expect("COLON")
+        expr = self._parse_assignment_expression()
+        return c_ast.GenericAssociation(typ, expr, self._tok_coord(tok))
 
     # BNF: offsetof_member_designator : identifier_or_typeid
     #                                ('.' identifier_or_typeid | '[' expression ']')*
@@ -2041,27 +2069,81 @@ class CParser:
 
         self._parse_error("Invalid constant", self._tok_coord(tok))
 
-    # BNF: unified_string_literal : STRING_LITERAL+
-    def _parse_unified_string_literal(self) -> c_ast.Node:
-        tok = self._expect("STRING_LITERAL")
-        node = c_ast.Constant("string", tok.value, self._tok_coord(tok))
-        while self._peek_type() == "STRING_LITERAL":
-            tok2 = self._advance()
-            node.value = node.value[:-1] + tok2.value[1:]
-        return node
-
-    # BNF: unified_wstring_literal : WSTRING_LITERAL+
-    def _parse_unified_wstring_literal(self) -> c_ast.Node:
+    # BNF: unified_string_literal : (STRING_LITERAL | WSTRING_LITERAL
+    #                               | U8STRING_LITERAL | U16STRING_LITERAL
+    #                               | U32STRING_LITERAL)+
+    def _parse_unified_string_literal(self) -> c_ast.Constant:
+        # Represent the whole run of adjacent literals with one Constant.
+        # C interprets escapes before concatenating the character sequences,
+        # whereas Constant.value holds source spelling. Simply removing the
+        # quotes between "\1" "23" would produce "\123", changing three
+        # characters into one (issue #392).
         tok = self._advance()
-        if tok.type not in _WSTR_LITERAL:
+        if tok.type not in _STRING_LITERAL:
             self._parse_error("Invalid string literal", self._tok_coord(tok))
-        node = c_ast.Constant("string", tok.value, self._tok_coord(tok))
-        while self._peek_type() in _WSTR_LITERAL:
+        # Split off the optional encoding prefix and remove the closing quote.
+        # Each part holds unquoted source text that can safely share one literal.
+        prefix, contents = tok.value.split('"', 1)
+        parts = [contents[:-1]]
+        while self._peek_type() in _STRING_LITERAL:
             tok2 = self._advance()
-            # u8" is three characters. L", u", and U" are two.
-            prefix_len = 3 if tok2.type == "U8STRING_LITERAL" else 2
-            node.value = node.value.rstrip()[:-1] + tok2.value[prefix_len:]
-        return node
+            next_prefix, next_contents = tok2.value.split('"', 1)
+            # The first nonempty prefix applies to the whole run, even if it
+            # occurs after ordinary literals. Conflicting prefixes retain the
+            # parser's existing permissive behavior: the first one wins.
+            prefix = prefix or next_prefix
+            next_contents = next_contents[:-1]
+            # Extend the current part when safe; otherwise start a new one so
+            # a quote boundary survives. Empty literals can merge, but do not
+            # end a trailing escape: "\1" "" "23" still needs a boundary.
+            if self._string_literal_needs_separator(parts[-1], next_contents):
+                parts.append(next_contents)
+            else:
+                parts[-1] += next_contents
+        # Re-quote each part, keeping only the necessary literal boundaries.
+        # The prefix on the first literal applies to the adjacent sequence.
+        # The generator can emit this value directly without decoding escapes.
+        value = prefix + '"' + '" "'.join(parts) + '"'
+        return c_ast.Constant("string", value, self._tok_coord(tok))
+
+    @staticmethod
+    def _string_literal_needs_separator(left: str, right: str) -> bool:
+        """Whether joining two literal bodies would change their C spelling."""
+        if not left or not right:
+            return False
+
+        # A generated trigraph would be replaced before C string processing;
+        # for example, merging "?" "?=" would create the trigraph for '#'.
+        boundary = left[-2:] + right[:2]
+        if any("??" + ch in boundary for ch in "=/'()!<>-"):
+            return True
+
+        # Only an escape reaching the end of left can absorb characters from
+        # right. The last backslash is the only possible start of that escape.
+        escape_start = left.rfind("\\")
+        if escape_start == -1:
+            return False
+        # An even run of backslashes represents escaped backslashes, not the
+        # start of the numeric escape that the following digits might suggest.
+        run_start = escape_start
+        while run_start > 0 and left[run_start - 1] == "\\":
+            run_start -= 1
+        if (escape_start - run_start + 1) % 2 == 0:
+            return False
+
+        escape = left[escape_start + 1 :]
+        if escape.startswith("x"):
+            # Hex escapes have no digit limit: "\x1" "a" must stay separated.
+            hex_digits = "0123456789abcdefABCDEF"
+            return right[0] in hex_digits and all(ch in hex_digits for ch in escape[1:])
+        # Octal escapes consume at most three digits: "\12" "3" needs a
+        # boundary, but "\123" "4" can become "\1234". Universal character names
+        # have fixed widths and cannot absorb characters from the next literal.
+        return (
+            1 <= len(escape) < 3
+            and all(ch in "01234567" for ch in escape)
+            and right[0] in "01234567"
+        )
 
     # ------------------------------------------------------------------
     # Initializers
@@ -2158,8 +2240,10 @@ class CParser:
             pragmas.append(self._parse_pppragma_directive())
         return pragmas
 
-    # BNF: static_assert : _STATIC_ASSERT '(' constant_expression (',' string_literal)? ')'
-    def _parse_static_assert(self) -> list[c_ast.Node]:
+    # BNF: static_assert : _STATIC_ASSERT '(' constant_expression
+    #                     (',' unified_string_literal)? ')' ';'
+    # C11 requires a message; omission is supported as an extension.
+    def _parse_static_assert(self) -> c_ast.StaticAssert:
         tok = self._expect("_STATIC_ASSERT")
         self._expect("LPAREN")
         cond = self._parse_constant_expression()
@@ -2167,7 +2251,8 @@ class CParser:
         if self._accept("COMMA"):
             msg = self._parse_unified_string_literal()
         self._expect("RPAREN")
-        return [c_ast.StaticAssert(cond, msg, self._tok_coord(tok))]
+        self._expect("SEMI")
+        return c_ast.StaticAssert(cond, msg, self._tok_coord(tok))
 
 
 _ASSIGNMENT_OPS = {
@@ -2250,6 +2335,7 @@ _EXPR_START = {
     "LNOT",
     "SIZEOF",
     "_ALIGNOF",
+    "_GENERIC",
     "OFFSETOF",
 }
 
@@ -2271,9 +2357,8 @@ _CHAR_CONST = {
     "U32CHAR_CONST",
 }
 
-_STRING_LITERAL = {"STRING_LITERAL"}
-
-_WSTR_LITERAL = {
+_STRING_LITERAL = {
+    "STRING_LITERAL",
     "WSTRING_LITERAL",
     "U8STRING_LITERAL",
     "U16STRING_LITERAL",
@@ -2281,12 +2366,7 @@ _WSTR_LITERAL = {
 }
 
 _STARTS_EXPRESSION = (
-    _EXPR_START
-    | _INT_CONST
-    | _FLOAT_CONST
-    | _CHAR_CONST
-    | _STRING_LITERAL
-    | _WSTR_LITERAL
+    _EXPR_START | _INT_CONST | _FLOAT_CONST | _CHAR_CONST | _STRING_LITERAL
 )
 
 _STARTS_STATEMENT = {
@@ -2304,7 +2384,6 @@ _STARTS_STATEMENT = {
     "DEFAULT",
     "PPPRAGMA",
     "_PRAGMA",
-    "_STATIC_ASSERT",
     "SEMI",
 }
 
