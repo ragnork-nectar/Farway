@@ -2,6 +2,10 @@
 *.env
 __pycache__/
 *.pyc
-farway_*.wav
-temp.wav
+.venv/
+temp/
+user_files/
+*.wav
 *.mp3
+farway_config.json
+farway_memory.json
