@@ -1,11 +1,17 @@
 """
-Sunday v19 — Multi-API Key Rotation
+Sunday v23 — Full Assistant + HUD (Separate Process)
 ========================================
-NEW:
-- Automatic rotation between multiple Gemini API keys
-- If one key exhausts quota → next key
-- Keys loaded from .env (GEMINI_API_KEY_1, _2, _3...)
-- All previous features intact
+FEATURES:
+- 🎨 HUD (separate process, no threading issues)
+- 🧠 Memory with personalized replies
+- 🗣️ Voice (Zira) + Wake word + Dual mode
+- 🔊 Volume, 📂 Apps, ⏯️ Media, 🔒 System
+- 🎵 Music via pywhatkit
+- 🌐 Websites
+- 📝 File manager
+- 💻 Code generator
+- 🛑 Stop command
+- 🔑 Multi-key Gemini rotation
 """
 
 import os
@@ -22,6 +28,9 @@ import win32com.client
 import pyautogui
 import psutil
 from dotenv import load_dotenv
+
+from memory_manager import Memory
+from hud_controller import init_hud
 
 try:
     import pywhatkit
@@ -47,32 +56,33 @@ ROOT_DIR = Path(__file__).parent.resolve()
 TEMP_DIR = ROOT_DIR / "temp"
 USER_FILES_DIR = ROOT_DIR / "user_files"
 CODE_DIR = USER_FILES_DIR / "code"
+MEMORY_DIR = USER_FILES_DIR / "memory"
 
 TEMP_DIR.mkdir(exist_ok=True)
 USER_FILES_DIR.mkdir(exist_ok=True)
 CODE_DIR.mkdir(exist_ok=True)
+MEMORY_DIR.mkdir(exist_ok=True)
 
 load_dotenv(ROOT_DIR / ".env")
 pyautogui.FAILSAFE = False
 
+memory = Memory()
+hud = init_hud(enabled=True)
+
 
 # ============================================================
-# 1) LOAD ALL API KEYS
+# 1) LOAD API KEYS
 # ============================================================
 API_KEYS = []
-
-# Load numbered keys: GEMINI_API_KEY_1, _2, _3...
 for i in range(1, 20):
     key = os.getenv(f"GEMINI_API_KEY_{i}")
     if key and key.strip():
         API_KEYS.append(key.strip())
 
-# Also support single GEMINI_API_KEY (backward compatible)
 single_key = os.getenv("GEMINI_API_KEY")
 if single_key and single_key.strip():
     API_KEYS.append(single_key.strip())
 
-# Remove duplicates preserving order
 _seen = set()
 _unique = []
 for k in API_KEYS:
@@ -82,8 +92,6 @@ for k in API_KEYS:
 API_KEYS = _unique
 
 print(f"[Setup] Loaded {len(API_KEYS)} API key(s)")
-
-# Track exhausted keys (in-memory for this session)
 EXHAUSTED_KEYS = set()
 
 
@@ -198,11 +206,14 @@ def speak(text, allow_stop=False):
         return
     print(f"[Sunday] {text}")
 
+    hud.set_state("speaking")
+
     if not allow_stop:
         try:
             speaker.Speak(text)
         except Exception as ex:
             print(f"[TTS Error] {ex}")
+        hud.set_state("idle")
         return
 
     STOP_FLAG.clear()
@@ -249,6 +260,7 @@ def speak(text, allow_stop=False):
     t_listener.start()
     t_speak.join(timeout=60)
     speech_done.set()
+    hud.set_state("idle")
 
 
 # ============================================================
@@ -578,7 +590,63 @@ def open_code_folder():
 
 
 # ============================================================
-# 11) MULTI-KEY GEMINI CALL
+# 10.5) MEMORY AUTO-DETECTION
+# ============================================================
+def detect_and_save_memory(text):
+    t = text.lower().strip()
+    saved = False
+
+    for pattern in [
+        r"my name is ([a-z ]+)",
+        r"mera naam ([a-z ]+) hai",
+        r"mera naam ([a-z ]+) h",
+        r"mera name ([a-z ]+) hai",
+    ]:
+        m = re.search(pattern, t)
+        if m:
+            name = m.group(1).strip().title()
+            for stop in (" Hai", " H", " Hun", " Hoon"):
+                if name.endswith(stop):
+                    name = name[:-len(stop)].strip()
+            if 2 <= len(name) <= 30:
+                memory.set_profile("name", name)
+                saved = True
+                break
+
+    for pattern in [
+        r"i like ([a-z ]+)",
+        r"mujhe ([a-z ]+) pasand",
+        r"my favourite ([a-z]+) is ([a-z ]+)",
+    ]:
+        m = re.search(pattern, t)
+        if m:
+            if "favourite" in pattern:
+                key = f"favourite_{m.group(1).strip()}"
+                value = m.group(2).strip()
+            else:
+                key = "likes"
+                value = m.group(1).strip()
+            memory.set_profile(key, value)
+            saved = True
+            break
+
+    for pattern in [
+        r"i am writing ([a-z ]+)",
+        r"my project is ([a-z ]+)",
+        r"i am working on ([a-z ]+)",
+    ]:
+        m = re.search(pattern, t)
+        if m:
+            fact = f"User is working on: {m.group(1).strip()}"
+            memory.add_fact(fact)
+            saved = True
+            break
+
+    return saved
+
+
+# ============================================================
+# 11) MULTI-KEY GEMINI
 # ============================================================
 CODE_GEN_SYSTEM = (
     "You are an expert programmer. The user wants you to write code. "
@@ -612,18 +680,15 @@ def _extract_code(raw):
 
 
 def _get_available_keys():
-    """Return list of non-exhausted keys, ordered."""
     available = [k for k in API_KEYS if k not in EXHAUSTED_KEYS]
-    # If all exhausted, return all (allow retry — maybe reset happened)
     if not available:
-        print("[AI] All keys marked exhausted — resetting and trying all")
+        print("[AI] All keys exhausted — resetting")
         EXHAUSTED_KEYS.clear()
         available = list(API_KEYS)
     return available
 
 
 def _is_quota_error(err_lower):
-    """Check if error is a quota/rate-limit error."""
     return any(k in err_lower for k in (
         "429", "quota", "exceeded", "resource_exhausted",
         "rate limit", "rate-limit", "too many requests",
@@ -631,38 +696,31 @@ def _is_quota_error(err_lower):
 
 
 def _is_server_busy(err_lower):
-    """Check if error is a temporary server busy error."""
     return any(k in err_lower for k in (
         "503", "unavailable", "overloaded", "internal",
     ))
 
 
 def _call_gemini(prompt, max_attempts_per_key=2):
-    """
-    Call Gemini with automatic key rotation.
-    Tries each available key until one works.
-    """
     if not API_KEYS:
-        print("[AI] No API keys configured")
         return None
 
     try:
         from google import genai
     except ImportError:
-        print("[AI] google-genai not installed")
         return None
+
+    hud.set_state("thinking")
 
     models_to_try = ["gemini-flash-latest", "gemini-3.8-flash", "gemini-2.5-flash"]
 
-    # Try each available key
     for key_index, api_key in enumerate(_get_available_keys()):
         short_key = api_key[-8:] if len(api_key) > 8 else api_key
         print(f"\n[AI] Trying key #{key_index + 1} (...{short_key})")
 
         try:
             client = genai.Client(api_key=api_key)
-        except Exception as e:
-            print(f"[AI] Client init failed for this key: {e}")
+        except Exception:
             EXHAUSTED_KEYS.add(api_key)
             continue
 
@@ -678,51 +736,43 @@ def _call_gemini(prompt, max_attempts_per_key=2):
                     )
                     text = (response.text or "").strip()
                     if text:
-                        print(f"[AI] ✅ Success with key #{key_index + 1} ({model_name}), {len(text)} chars")
+                        print(f"[AI] ✅ Success with key #{key_index + 1}, {len(text)} chars")
+                        hud.set_state("idle")
                         return text
                     else:
-                        print(f"[AI]   Empty response, retrying")
                         time.sleep(1)
                         continue
-
                 except Exception as e:
                     err_lower = str(e).lower()
-
                     if _is_quota_error(err_lower):
-                        print(f"[AI]   ❌ Quota exhausted on this key ({model_name})")
+                        print(f"[AI]   ❌ Quota exhausted")
                         EXHAUSTED_KEYS.add(api_key)
                         key_exhausted = True
                         break
-
                     if _is_server_busy(err_lower):
-                        print(f"[AI]   ⏳ Server busy, retrying in 2s...")
+                        print(f"[AI]   ⏳ Server busy, retrying...")
                         time.sleep(2)
                         continue
-
-                    # Other error (bad model, etc.)
                     print(f"[AI]   ⚠️  Error: {str(e)[:100]}")
                     break
 
             if key_exhausted:
                 break
 
-        if not key_exhausted:
-            # Non-quota error on this key — move to next key anyway
-            print(f"[AI] Key #{key_index + 1} failed for other reasons, trying next...")
-
-    print("[AI] ❌ All API keys exhausted or failed")
+    print("[AI] ❌ All API keys exhausted")
+    hud.set_state("idle")
     return None
 
 
 # ============================================================
-# 12) CODE GENERATION (using rotated keys)
+# 12) CODE GENERATION
 # ============================================================
 def ai_generate_code(description):
     print(f"\n[CodeGen] Generating code for: {description}")
     prompt = f"{CODE_GEN_SYSTEM}\n\nTask: {description}"
     raw = _call_gemini(prompt)
     if not raw:
-        print("[CodeGen] Primary failed, trying simple fallback...")
+        print("[CodeGen] Primary failed, trying fallback...")
         simple = f"Write complete working code for: {description}. Output only code."
         raw = _call_gemini(simple)
     if not raw:
@@ -848,7 +898,7 @@ def workflow_generate_code(description):
     speak("Let me write that code for you")
     code = ai_generate_code(description)
     if not code:
-        speak("Sorry, all API keys are exhausted. Try again later.")
+        speak("Sorry, all API keys are exhausted.")
         return
 
     filename = detect_filename(description)
@@ -861,10 +911,6 @@ def workflow_generate_code(description):
             subprocess.Popen(f'code "{path}"', shell=True)
         except Exception:
             pass
-        print(f"\n[CODE] Saved to: {path}\n")
-        print("=" * 60)
-        print(code[:1500])
-        print("=" * 60)
     except Exception as e:
         speak(f"Could not save file: {e}")
 
@@ -886,13 +932,12 @@ def workflow_fix_code(filename):
     speak("Fixing the bugs")
     fixed = ai_fix_code(original)
     if not fixed:
-        speak("Sorry, could not fix the code right now.")
+        speak("Sorry, could not fix right now.")
         return
 
     try:
         path.write_text(fixed, encoding="utf-8")
         speak(f"Fixed. I updated {path.name}")
-        print(f"\n[CODE FIXED] {path}\n")
     except Exception as e:
         speak(f"Could not save: {e}")
 
@@ -920,7 +965,6 @@ def workflow_improve_code(filename):
     try:
         path.write_text(improved, encoding="utf-8")
         speak(f"Improved {path.name}")
-        print(f"\n[CODE IMPROVED] {path}\n")
     except Exception as e:
         speak(f"Could not save: {e}")
 
@@ -963,7 +1007,56 @@ def process_command(c):
         speak("Okay, stopped.")
         return
 
-    # CODE (highest priority)
+    if detect_and_save_memory(original):
+        name = memory.get_profile("name")
+        if name:
+            speak(f"Got it, I will remember that, {name.split()[0]}")
+        else:
+            speak("Got it, I will remember that.")
+        return
+
+    if "what is my name" in c or "mera naam kya" in c or "what's my name" in c:
+        name = memory.get_profile("name")
+        if name:
+            speak(f"Your name is {name}")
+        else:
+            speak("I do not know your name yet.")
+        return
+
+    if "what do you know about me" in c or "mere baare mein" in c:
+        profile = memory.get_profile()
+        facts = memory.get_facts(limit=10)
+        if not profile and not facts:
+            speak("I do not know anything about you yet.")
+            return
+        parts = []
+        if profile:
+            parts.append("Profile: " + ", ".join(f"{k} is {v}" for k, v in profile.items()))
+        if facts:
+            parts.append("Facts: " + "; ".join(facts[:5]))
+        speak(". ".join(parts))
+        return
+
+    if c.startswith("remember ") or c.startswith("yaad rakho "):
+        fact = c.replace("remember ", "").replace("yaad rakho ", "").strip()
+        if fact:
+            memory.add_fact(fact)
+            speak(f"Okay, I will remember: {fact}")
+        return
+
+    if c.startswith("forget ") or c.startswith("bhool jao "):
+        what = c.replace("forget ", "").replace("bhool jao ", "").strip()
+        if memory.delete_profile(what):
+            speak(f"Forgot {what}")
+        else:
+            speak(f"I do not have {what} in memory")
+        return
+
+    if "forget everything" in c or "clear memory" in c or "sab bhool jao" in c:
+        memory.clear_all()
+        speak("All memory cleared")
+        return
+
     if is_code_create_request(c):
         workflow_generate_code(original)
         return
@@ -974,12 +1067,6 @@ def process_command(c):
             if w.endswith((".py", ".html", ".css", ".js")):
                 fname = w
                 break
-        if not fname:
-            for kw in ("in ", "the "):
-                idx = c.find(kw)
-                if idx != -1:
-                    fname = c[idx + len(kw):].strip()
-                    break
         if fname:
             workflow_fix_code(fname)
         else:
@@ -1010,10 +1097,9 @@ def process_command(c):
             speak("Which file should I run?")
         return
 
-    # FILE MANAGER
     if "open my files" in c or "open user files" in c:
         speak(open_user_files_folder()); return
-    if "open code folder" in c or "open my code" in c:
+    if "open code folder" in c:
         speak(open_code_folder()); return
     if ("list" in c or "show" in c) and ("file" in c or "files" in c):
         speak(list_files()); return
@@ -1209,15 +1295,20 @@ def process_command(c):
     # UNKNOWN → AI
     if API_KEYS:
         speak("Let me think")
+        memory_context = memory.build_context()
         prompt = (
             "You are Sunday, a helpful female voice assistant. "
             "Answer in 1-2 short sentences suitable for voice. "
-            f"Question: {c}"
         )
+        if memory_context:
+            prompt += f"\n\nMemory about user:\n{memory_context}\n"
+        prompt += f"\nQuestion: {c}"
         raw = _call_gemini(prompt)
+        memory.add_message("user", c)
         if raw:
             parts = [p.strip() for p in raw.split(".") if p.strip()]
             short = ". ".join(parts[:2]) + "." if parts else raw[:200]
+            memory.add_message("assistant", short)
             speak(short, allow_stop=True)
         else:
             speak("Sorry, all API keys are exhausted.")
@@ -1230,13 +1321,18 @@ def process_command(c):
 # ============================================================
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("  Sunday — v19 (Multi-Key Rotation)")
+    print("  Sunday — v23 (Full Assistant + HUD)")
     print("=" * 60)
     speak("Sunday is ready. Say wake up Sunday to activate me.")
     print("=" * 60)
     print(f"[Sunday] User files: {USER_FILES_DIR}")
-    print(f"[Sunday] Code folder: {CODE_DIR}")
+    print(f"[Sunday] Memory folder: {MEMORY_DIR}")
     print(f"[Sunday] API keys loaded: {len(API_KEYS)}")
+    print(f"[Sunday] HUD: {'enabled' if hud and hud.enabled else 'disabled'}")
+
+    current_name = memory.get_profile("name")
+    if current_name:
+        print(f"[Sunday] Memory: I remember {current_name}")
     print("=" * 60)
 
     recognizer = sr.Recognizer()
@@ -1247,6 +1343,7 @@ if __name__ == "__main__":
         recognizer.adjust_for_ambient_noise(source, duration=1)
 
     print("\n😴 SLEEP MODE — Say 'Wake up Sunday'")
+    print("🧠 Say 'Mera naam X hai' → memory saves")
     print("💻 Say 'Make a Python calculator' → auto-code!")
     print("👋 Say 'Bye Sunday' → sleep")
     print("🚪 Say 'Goodbye' → exit\n")
@@ -1257,8 +1354,10 @@ if __name__ == "__main__":
         try:
             with mic as source:
                 if mode == "sleep":
+                    hud.set_state("idle")
                     audio = recognizer.listen(source, timeout=8, phrase_time_limit=4)
                 else:
+                    hud.set_state("listening")
                     audio = recognizer.listen(source, timeout=6, phrase_time_limit=10)
 
             try:
@@ -1280,7 +1379,11 @@ if __name__ == "__main__":
                     break
                 if is_wake(text):
                     mode = "command"
-                    speak("Yes, I'm listening")
+                    name = memory.get_profile("name")
+                    if name:
+                        speak(f"Yes {name.split()[0]}, I'm listening")
+                    else:
+                        speak("Yes, I'm listening")
                     print("\n🎧 COMMAND MODE\n")
                 continue
 
