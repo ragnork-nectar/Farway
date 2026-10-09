@@ -1,83 +1,191 @@
 """
-HUD Controller — runs Sunday HUD in a SEPARATE PROCESS.
-Uses file-based IPC to communicate state.
-Avoids Tkinter threading issues completely.
+HUD Controller — Manages BOTH small (Tkinter) + fullscreen (Web/Cosmos Orb) HUDs.
+Both run in separate processes. Files are in the project root.
 """
 
+import sys
 import multiprocessing
-import os
+import traceback
 from pathlib import Path
 
 
-def _hud_process():
-    """Entry point for the HUD subprocess."""
+# ============================================================
+# PATHS
+# ============================================================
+ROOT_DIR = Path(__file__).parent.resolve()
+
+
+# ============================================================
+# SMALL HUD PROCESS (Tkinter arc reactor, bottom-right)
+# ============================================================
+def _small_hud_process():
     try:
+        if str(ROOT_DIR) not in sys.path:
+            sys.path.insert(0, str(ROOT_DIR))
         from hud import SundayHUD
         hud = SundayHUD(size=220, position="bottom-right")
         hud.run()
     except Exception as e:
-        print(f"[HUD Process] Fatal: {e}")
+        print(f"[Small HUD] Fatal: {e}")
+        traceback.print_exc()
 
 
+# ============================================================
+# FULLSCREEN HUD PROCESS (Web / Cosmos Orb)
+# ============================================================
+def _fullscreen_hud_process():
+    try:
+        if str(ROOT_DIR) not in sys.path:
+            sys.path.insert(0, str(ROOT_DIR))
+        import threading
+        from hud_web import run_server, run_hud_window
+
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+        run_hud_window()
+    except Exception as e:
+        print(f"[Fullscreen HUD] Fatal: {e}")
+        traceback.print_exc()
+
+
+# ============================================================
+# HUD CONTROLLER
+# ============================================================
 class HUDController:
-    """Manages HUD subprocess + state file."""
+    """Manages both small + fullscreen HUDs via separate processes."""
 
-    def __init__(self, enabled=True):
+    def __init__(self, enabled=True, fullscreen=True):
         self.enabled = enabled
-        self.process = None
+        self.fullscreen_enabled = fullscreen
+        self.small_process = None
+        self.big_process = None
 
-        root_dir = Path(__file__).parent.resolve()
-        temp_dir = root_dir / "temp"
-        temp_dir.mkdir(exist_ok=True)
-        self.state_file = temp_dir / "hud_state.txt"
+        # Temp folder in project root
+        self.temp_dir = ROOT_DIR / "temp"
+        self.temp_dir.mkdir(exist_ok=True)
+
+        # State files
+        self.state_file = self.temp_dir / "hud_state.txt"
+        self.full_state_file = self.temp_dir / "hud_fullscreen_state.txt"
+        self.full_text_file = self.temp_dir / "hud_fullscreen_text.txt"
+        self.playing_file = self.temp_dir / "hud_now_playing.txt"
+        self.visible_file = self.temp_dir / "hud_visible.txt"
+        self.palette_file = self.temp_dir / "hud_palette.txt"
+        self.level_file = self.temp_dir / "hud_level.txt"
 
         if not enabled:
             print("[HUD] Disabled")
             return
 
         try:
-            # Initial state
-            self._write_state("idle")
+            # Initial states
+            self._write(self.state_file, "idle")
+            self._write(self.full_state_file, "idle")
+            self._write(self.full_text_file, "")
+            self._write(self.playing_file, "")
+            self._write(self.visible_file, "hide")
+            self._write(self.palette_file, "amber")
 
-            # Start HUD process
-            self.process = multiprocessing.Process(
-                target=_hud_process,
+            # Start small HUD
+            self.small_process = multiprocessing.Process(
+                target=_small_hud_process,
                 daemon=True,
+                name="SundaySmallHUD",
             )
-            self.process.start()
-            print("[HUD] Started in separate process")
+            self.small_process.start()
+            print("[HUD] Small arc reactor started (bottom-right)")
+
+            # Start fullscreen HUD
+            if self.fullscreen_enabled:
+                self.big_process = multiprocessing.Process(
+                    target=_fullscreen_hud_process,
+                    daemon=True,
+                    name="SundayFullscreenHUD",
+                )
+                self.big_process.start()
+                print("[HUD] Fullscreen Cosmos Orb started (hidden)")
 
         except Exception as e:
             print(f"[HUD] Failed to start: {e}")
+            traceback.print_exc()
             self.enabled = False
 
-    def _write_state(self, state):
+    # ---------- INTERNAL ----------
+    def _write(self, path, content):
         try:
-            self.state_file.write_text(state)
-        except Exception:
-            pass
+            Path(path).write_text(str(content), encoding="utf-8")
+        except Exception as e:
+            print(f"[HUD] Write failed ({path}): {e}")
 
+    # ---------- STATE ----------
     def set_state(self, state):
         if not self.enabled:
             return
-        self._write_state(state)
+        self._write(self.state_file, state)
+        if state == "thinking":
+            self._write(self.full_state_file, "listening")
+        else:
+            self._write(self.full_state_file, state)
+
+    def set_text(self, text):
+        if not self.enabled:
+            return
+        try:
+            truncated = (text or "")[:200]
+            self._write(self.full_text_file, truncated)
+        except Exception:
+            pass
+
+    def set_now_playing(self, text):
+        if not self.enabled:
+            return
+        try:
+            truncated = (text or "")[:60]
+            self._write(self.playing_file, truncated)
+        except Exception:
+            pass
 
     def set_mic_level(self, level):
-        pass
+        if not self.enabled:
+            return
+        try:
+            v = max(0.0, min(1.0, float(level)))
+            self._write(self.level_file, str(v))
+        except Exception:
+            pass
 
+    def set_palette(self, palette):
+        if not self.enabled:
+            return
+        if palette not in ("amber", "cyan", "violet"):
+            return
+        self._write(self.palette_file, palette)
+
+    # ---------- VISIBILITY ----------
+    def show_fullscreen(self):
+        self._write(self.visible_file, "show")
+
+    def hide_fullscreen(self):
+        self._write(self.visible_file, "hide")
+
+    # ---------- SHUTDOWN ----------
     def stop(self):
-        if self.process and self.process.is_alive():
-            try:
-                self.process.terminate()
-                self.process.join(timeout=2)
-            except Exception:
-                pass
+        for p in (self.small_process, self.big_process):
+            if p and p.is_alive():
+                try:
+                    p.terminate()
+                    p.join(timeout=2)
+                except Exception:
+                    pass
 
 
+# ============================================================
+# GLOBAL SINGLETON
+# ============================================================
 hud = None
 
 
-def init_hud(enabled=True):
+def init_hud(enabled=True, fullscreen=True):
     global hud
-    hud = HUDController(enabled=enabled)
+    hud = HUDController(enabled=enabled, fullscreen=fullscreen)
     return hud

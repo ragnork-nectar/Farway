@@ -1,0 +1,533 @@
+<title>Sunday — Arc Reactor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #05030a;
+  --fg: #ffe9c9;
+  --dim: #8f7a64;
+  --edge: #3a2616;
+  --accent: #ff9a2e;
+  --font-ui: 'Chakra Petch', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color-scheme: dark;
+}
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  overflow: hidden;
+  position: relative;
+}
+#stage { position: absolute; inset: 0; touch-action: none; cursor: grab; }
+#stage:active { cursor: grabbing; }
+#stage canvas { display: block; width: 100%; height: 100%; }
+
+.readout {
+  position: absolute; top: 16px; left: 16px;
+  font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--dim); pointer-events: none;
+  display: grid; gap: 6px; min-width: 180px;
+}
+.readout b { color: var(--fg); font-weight: 600; }
+.meter { height: 3px; background: var(--edge); position: relative; }
+.meter i { position: absolute; inset: 0 auto 0 0; width: 0%; background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+
+/* Corner info panels */
+.panel {
+  position: absolute;
+  font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--dim); pointer-events: none;
+  background: rgba(5, 3, 10, 0.55);
+  border: 1px solid var(--edge);
+  padding: 12px 16px;
+  min-width: 200px;
+  display: grid; gap: 6px;
+  backdrop-filter: blur(2px);
+}
+.panel .row {
+  display: flex; justify-content: space-between;
+  font-size: 12px;
+}
+.panel .row b { color: var(--fg); font-weight: 600; }
+.panel .title {
+  color: var(--accent); font-weight: 600; font-size: 11px;
+  letter-spacing: 0.2em; border-bottom: 1px solid var(--edge);
+  padding-bottom: 6px; margin-bottom: 2px;
+}
+.panel.top-right { top: 16px; right: 16px; }
+.panel.bottom-left { bottom: 16px; left: 16px; }
+.panel.bottom-right { bottom: 16px; right: 16px; }
+
+/* Spoken text overlay */
+.spoken-text {
+  position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%);
+  max-width: 70%; padding: 12px 24px;
+  background: rgba(5, 3, 10, 0.8);
+  border: 1px solid var(--edge);
+  color: var(--fg); font-family: var(--font-ui);
+  font-size: 15px; letter-spacing: 0.08em; text-align: center;
+  opacity: 0; transition: opacity 0.4s;
+  pointer-events: none;
+  text-shadow: 0 0 12px var(--accent);
+}
+.spoken-text.show { opacity: 1; border-color: var(--accent); box-shadow: 0 0 20px rgba(255, 154, 46, 0.25); }
+
+.hint-bar {
+  position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+  font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--dim); pointer-events: none;
+}
+</style>
+
+<div id="stage" aria-label="Sunday AI Core"></div>
+
+<!-- Top-left: System state -->
+<div class="readout">
+  <div>SUNDAY OS <b>v1.0</b></div>
+  <div>STATE <b id="rdState">Idle</b></div>
+  <div class="meter"><i id="rdMeter"></i></div>
+  <div>LEVEL <b id="rdLevel">0</b>%</div>
+</div>
+
+<!-- Top-right: Time / Date -->
+<div class="panel top-right">
+  <div class="title">TIME / DATE</div>
+  <div class="row"><span>TIME</span><b id="rdTime">--:--</b></div>
+  <div class="row"><span>DATE</span><b id="rdDate">--</b></div>
+</div>
+
+<!-- Bottom-left: System stats -->
+<div class="panel bottom-left">
+  <div class="title">SYSTEM STATS</div>
+  <div class="row"><span>CPU</span><b id="rdCpu">0%</b></div>
+  <div class="row"><span>RAM</span><b id="rdRam">0%</b></div>
+</div>
+
+<!-- Bottom-right: Now Playing -->
+<div class="panel bottom-right">
+  <div class="title">NOW PLAYING</div>
+  <div class="row"><span id="rdPlaying">Nothing</span></div>
+</div>
+
+<!-- Spoken text -->
+<div class="spoken-text" id="spokenText"></div>
+
+<!-- Bottom hint -->
+<div class="hint-bar">SUNDAY — DRAG TO ROTATE • F12 TO HIDE</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  /* ---------- setup ---------- */
+  var stage = document.getElementById('stage');
+  var renderer = new THREE.WebGLRenderer({ antialias: true });
+  var PR = Math.min(window.devicePixelRatio || 1, 2);
+  renderer.setPixelRatio(PR);
+  renderer.setClearColor(0x05030a, 1);
+  stage.appendChild(renderer.domElement);
+
+  var scene = new THREE.Scene();
+  var camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+  camera.position.z = 7.2;
+
+  var root = new THREE.Group();
+  scene.add(root);
+
+  var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var timeScale = reduced ? 0.25 : 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function randn() { return (Math.random() + Math.random() + Math.random() - 1.5) / 1.5; }
+  function randDir() {
+    var u = Math.random() * 2 - 1, th = Math.random() * Math.PI * 2, s = Math.sqrt(1 - u * u);
+    return [s * Math.cos(th), u, s * Math.sin(th)];
+  }
+
+  /* ---------- palettes ---------- */
+  var PALETTES = {
+    amber:  { core: [1.0, 0.96, 0.82], hot: [1.0, 0.62, 0.14], cool: [0.85, 0.22, 0.03] },
+    cyan:   { core: [0.86, 1.0, 1.0],  hot: [0.15, 0.80, 1.0],  cool: [0.04, 0.28, 0.92] },
+    violet: { core: [1.0, 0.92, 1.0],  hot: [0.78, 0.40, 1.0],  cool: [0.33, 0.08, 0.80] }
+  };
+
+  var uniforms = {
+    uTime:  { value: 0 },
+    uLevel: { value: 0 },
+    uPR:    { value: PR },
+    uHot:   { value: new THREE.Color() },
+    uCool:  { value: new THREE.Color() }
+  };
+
+  /* ---------- soft point shader ---------- */
+  var pointMat = new THREE.ShaderMaterial({
+    uniforms: uniforms,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexShader: [
+      'attribute float aSize; attribute float aSeed; attribute float aMix;',
+      'uniform float uTime, uLevel, uPR; uniform vec3 uHot, uCool;',
+      'varying vec3 vCol; varying float vTw;',
+      'void main(){',
+      '  vec3 p = position;',
+      '  float tw = 0.55 + 0.45 * sin(uTime * 2.2 + aSeed * 60.0);',
+      '  p += normalize(p + 0.0001) * uLevel * 0.10 * sin(uTime * 7.0 + aSeed * 30.0);',
+      '  vec4 mv = modelViewMatrix * vec4(p, 1.0);',
+      '  gl_Position = projectionMatrix * mv;',
+      '  gl_PointSize = aSize * uPR * (1.0 + uLevel * 0.7) * (7.0 / -mv.z) * (0.7 + 0.5 * tw);',
+      '  vCol = mix(uCool, uHot, aMix);',
+      '  vTw = tw;',
+      '}'
+    ].join('\n'),
+    fragmentShader: [
+      'varying vec3 vCol; varying float vTw;',
+      'void main(){',
+      '  float d = length(gl_PointCoord - 0.5) * 2.0;',
+      '  if (d > 1.0) discard;',
+      '  float a = pow(1.0 - d, 2.0);',
+      '  gl_FragColor = vec4(vCol * (0.7 + vTw) * a * 1.5, a);',
+      '}'
+    ].join('\n')
+  });
+
+  function makePoints(positions, sizes, seeds, mixes) {
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    g.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+    g.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
+    g.setAttribute('aMix', new THREE.BufferAttribute(mixes, 1));
+    var p = new THREE.Points(g, pointMat);
+    p.frustumCulled = false;
+    return p;
+  }
+
+  /* ---------- core glow ---------- */
+  function glowTexture() {
+    var c = document.createElement('canvas');
+    c.width = c.height = 256;
+    var x = c.getContext('2d');
+    var g = x.createRadialGradient(128, 128, 0, 128, 128, 128);
+    g.addColorStop(0.0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.15, 'rgba(255,255,255,0.75)');
+    g.addColorStop(0.4, 'rgba(255,255,255,0.22)');
+    g.addColorStop(1.0, 'rgba(255,255,255,0)');
+    x.fillStyle = g;
+    x.fillRect(0, 0, 256, 256);
+    return new THREE.CanvasTexture(c);
+  }
+  var tex = glowTexture();
+  function makeSprite(opacity) {
+    var m = new THREE.SpriteMaterial({ map: tex, color: 0xffffff, transparent: true, opacity: opacity, depthWrite: false, blending: THREE.AdditiveBlending });
+    return new THREE.Sprite(m);
+  }
+  var halo = makeSprite(0.9);
+  var core = makeSprite(1.0);
+  var flare = makeSprite(0.5);
+  scene.add(halo, flare, core);
+
+  /* ---------- orbital particle rings ---------- */
+  var rings = [];
+  (function buildRings() {
+    var RING_COUNT = 18, N = 520;
+    for (var r = 0; r < RING_COUNT; r++) {
+      var a = rand(0.45, 1.75);
+      var b = a * rand(0.55, 1.0);
+      var pos = new Float32Array(N * 3), sz = new Float32Array(N), sd = new Float32Array(N), mx = new Float32Array(N);
+      for (var i = 0; i < N; i++) {
+        var t = (i / N) * Math.PI * 2;
+        var spread = 0.035 + a * 0.03;
+        pos[i * 3]     = Math.cos(t) * a + randn() * spread;
+        pos[i * 3 + 1] = Math.sin(t) * b + randn() * spread;
+        pos[i * 3 + 2] = randn() * spread * 1.6;
+        sz[i] = rand(1.2, 3.6) * (Math.random() < 0.05 ? 2.2 : 1);
+        sd[i] = Math.random();
+        mx[i] = Math.min(1, Math.max(0, 1 - a / 2.0 + randn() * 0.25));
+      }
+      var pts = makePoints(pos, sz, sd, mx);
+      var spinGroup = new THREE.Group();
+      spinGroup.add(pts);
+      var tilt = new THREE.Group();
+      tilt.add(spinGroup);
+      tilt.rotation.set(rand(0, Math.PI), rand(0, Math.PI), rand(0, Math.PI));
+      root.add(tilt);
+      rings.push({ spin: spinGroup, tilt: tilt, speed: rand(0.12, 0.55) * (Math.random() < 0.5 ? -1 : 1), drift: [rand(-0.05, 0.05), rand(-0.07, 0.07)] });
+    }
+  })();
+
+  /* ---------- outer streak shell ---------- */
+  var streaks;
+  (function buildStreaks() {
+    var N = 1500;
+    var pos = new Float32Array(N * 6), col = new Float32Array(N * 6);
+    streaks = { N: N, pos: pos, col: col, dirs: [], r0: [], len: [] };
+    for (var i = 0; i < N; i++) {
+      var d = randDir();
+      var squash = 0.82;
+      d[1] *= squash;
+      var r0 = rand(1.15, 1.95);
+      var len = 0.03 + Math.pow(Math.random(), 3) * 0.42;
+      streaks.dirs.push(d); streaks.r0.push(r0); streaks.len.push(len);
+      pos[i*6]   = d[0]*r0;         pos[i*6+1] = d[1]*r0;         pos[i*6+2] = d[2]*r0;
+      pos[i*6+3] = d[0]*(r0+len);   pos[i*6+4] = d[1]*(r0+len);   pos[i*6+5] = d[2]*(r0+len);
+    }
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    var m = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+    streaks.mesh = new THREE.LineSegments(g, m);
+    streaks.mesh.frustumCulled = false;
+    root.add(streaks.mesh);
+  })();
+
+  /* ---------- radial rays ---------- */
+  var RAY_N = 58, RAY_PTS = 34;
+  var rays = { dir: [], base: [], phase: [], speed: [] };
+  var rayLine, rayPoints, rayLinePos, rayPtPos, rayLineCol;
+  (function buildRays() {
+    rayLinePos = new Float32Array(RAY_N * 6);
+    rayLineCol = new Float32Array(RAY_N * 6);
+    rayPtPos = new Float32Array(RAY_N * RAY_PTS * 3);
+    var sz = new Float32Array(RAY_N * RAY_PTS), sd = new Float32Array(RAY_N * RAY_PTS), mx = new Float32Array(RAY_N * RAY_PTS);
+    rays.t = new Float32Array(RAY_N * RAY_PTS);
+    for (var i = 0; i < RAY_N; i++) {
+      rays.dir.push(randDir());
+      rays.base.push(rand(1.0, 2.7));
+      rays.phase.push(rand(0, 6.28));
+      rays.speed.push(rand(0.6, 2.2));
+      for (var j = 0; j < RAY_PTS; j++) {
+        var k = i * RAY_PTS + j;
+        var t = (j + Math.random() * 0.6) / RAY_PTS;
+        rays.t[k] = t;
+        sz[k] = 2.4 + (1 - t) * 4.5;
+        sd[k] = Math.random();
+        mx[k] = 1 - t * 0.9;
+      }
+    }
+    var lg = new THREE.BufferGeometry();
+    lg.setAttribute('position', new THREE.BufferAttribute(rayLinePos, 3));
+    lg.setAttribute('color', new THREE.BufferAttribute(rayLineCol, 3));
+    rayLine = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+    rayLine.frustumCulled = false;
+    rayPoints = makePoints(rayPtPos, sz, sd, mx);
+    root.add(rayLine, rayPoints);
+  })();
+
+  /* ---------- palette application ---------- */
+  function applyPalette(name) {
+    var p = PALETTES[name]; if (!p) return;
+    uniforms.uHot.value.setRGB(p.hot[0], p.hot[1], p.hot[2]);
+    uniforms.uCool.value.setRGB(p.cool[0], p.cool[1], p.cool[2]);
+    halo.material.color.setRGB(p.hot[0], p.hot[1], p.hot[2]);
+    flare.material.color.setRGB(p.hot[0], p.hot[1], p.hot[2]);
+    core.material.color.setRGB(p.core[0], p.core[1], p.core[2]);
+    for (var i = 0; i < RAY_N; i++) {
+      rayLineCol[i*6]   = p.core[0];        rayLineCol[i*6+1] = p.core[1];        rayLineCol[i*6+2] = p.core[2];
+      rayLineCol[i*6+3] = p.cool[0] * 0.12; rayLineCol[i*6+4] = p.cool[1] * 0.12; rayLineCol[i*6+5] = p.cool[2] * 0.12;
+    }
+    rayLine.geometry.attributes.color.needsUpdate = true;
+    for (var s = 0; s < streaks.N; s++) {
+      var f = Math.min(1, Math.max(0, (streaks.r0[s] - 1.1) / 0.9));
+      var br = 0.35 + (1 - f) * 0.5;
+      streaks.col[s*6]   = p.hot[0] * br;  streaks.col[s*6+1] = p.hot[1] * br;  streaks.col[s*6+2] = p.hot[2] * br;
+      streaks.col[s*6+3] = p.cool[0] * 0.1; streaks.col[s*6+4] = p.cool[1] * 0.1; streaks.col[s*6+5] = p.cool[2] * 0.1;
+    }
+    streaks.mesh.geometry.attributes.color.needsUpdate = true;
+    var c = uniforms.uHot.value;
+    var css = 'rgb(' + Math.round(c.r * 255) + ',' + Math.round(c.g * 255) + ',' + Math.round(c.b * 255) + ')';
+    document.documentElement.style.setProperty('--accent', css);
+  }
+  applyPalette('amber');
+
+  /* ---------- state / level ---------- */
+  var state = 'idle';
+  var level = 0, targetLevel = 0, externalLevel = null;
+  var speakNoise = 0, speakNext = 0;
+
+  function computeTarget(t) {
+    if (externalLevel !== null) return externalLevel;
+    if (state === 'idle') return 0.06 + 0.04 * Math.sin(t * 0.9);
+    if (state === 'listening') return 0.22 + 0.10 * Math.sin(t * 2.1) + 0.05 * Math.sin(t * 5.3);
+    if (t > speakNext) { speakNoise = Math.random() < 0.18 ? rand(0.0, 0.2) : rand(0.35, 1.0); speakNext = t + rand(0.07, 0.22); }
+    return speakNoise;
+  }
+
+  /* ---------- interaction ---------- */
+  var rotX = 0.25, rotY = 0, velX = 0, velY = 0, dragging = false, lastX = 0, lastY = 0;
+  stage.addEventListener('pointerdown', function (e) {
+    dragging = true; lastX = e.clientX; lastY = e.clientY;
+    try { stage.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+  stage.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var dx = e.clientX - lastX, dy = e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    velY = dx * 0.006; velX = dy * 0.006;
+    rotY += velY; rotX += velX;
+  });
+  function endDrag() { dragging = false; }
+  stage.addEventListener('pointerup', endDrag);
+  stage.addEventListener('pointercancel', endDrag);
+
+  /* ---------- resize ---------- */
+  function resize() {
+    var w = window.innerWidth, h = window.innerHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.position.z = w / h < 0.8 ? 7.2 / Math.max(0.55, (w / h) * 1.15) : 7.2;
+    camera.updateProjectionMatrix();
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  /* ---------- UI wiring ---------- */
+  var rdState = document.getElementById('rdState');
+  var rdMeter = document.getElementById('rdMeter');
+  var rdLevel = document.getElementById('rdLevel');
+  var rdTime = document.getElementById('rdTime');
+  var rdDate = document.getElementById('rdDate');
+  var rdCpu = document.getElementById('rdCpu');
+  var rdRam = document.getElementById('rdRam');
+  var rdPlaying = document.getElementById('rdPlaying');
+
+  function setState(s) {
+    if (s !== 'idle' && s !== 'listening' && s !== 'speaking') return;
+    state = s; externalLevel = null;
+    if (rdState) rdState.textContent = s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  window.orb = {
+    setLevel: function (v) { externalLevel = (v === null || v === undefined) ? null : Math.max(0, Math.min(1, v)); },
+    setState: setState,
+    setPalette: applyPalette
+  };
+
+  /* ---------- SUNDAY INTEGRATION ---------- */
+  var spokenTextEl = document.getElementById('spokenText');
+  var lastState = 'idle';
+  var lastText = '';
+
+  function pollSunday() {
+    fetch('/state')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.state && data.state !== lastState) {
+          lastState = data.state;
+          if (window.orb && window.orb.setState) window.orb.setState(data.state);
+        }
+        if (data.palette && window.orb && window.orb.setPalette) {
+          window.orb.setPalette(data.palette);
+        }
+        if (data.level !== undefined && data.level !== null && window.orb && window.orb.setLevel) {
+          window.orb.setLevel(data.level);
+        }
+        if (data.text !== undefined && data.text !== lastText) {
+          lastText = data.text || '';
+          if (spokenTextEl) {
+            if (lastText) {
+              spokenTextEl.textContent = lastText;
+              spokenTextEl.classList.add('show');
+            } else {
+              spokenTextEl.classList.remove('show');
+            }
+          }
+        }
+        // System stats
+        if (data.cpu !== undefined && rdCpu) rdCpu.textContent = data.cpu + '%';
+        if (data.ram !== undefined && rdRam) rdRam.textContent = data.ram + '%';
+      })
+      .catch(function () {});
+
+    setTimeout(pollSunday, 500);
+  }
+
+  // Local time/date updater
+  function updateClock() {
+    var now = new Date();
+    var hh = String(now.getHours()).padStart(2, '0');
+    var mm = String(now.getMinutes()).padStart(2, '0');
+    var ss = String(now.getSeconds()).padStart(2, '0');
+    if (rdTime) rdTime.textContent = hh + ':' + mm + ':' + ss;
+    var days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    if (rdDate) rdDate.textContent = days[now.getDay()] + ' ' + months[now.getMonth()] + ' ' + String(now.getDate()).padStart(2, '0');
+  }
+  updateClock();
+  setInterval(updateClock, 1000);
+
+  setTimeout(pollSunday, 300);
+
+  /* F12 to close (for test) */
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'F12') { try { window.close(); } catch (err) {} }
+  });
+
+  /* ---------- animation loop ---------- */
+  var clock = new THREE.Clock(), T = 0, lastReadout = 0;
+
+  function frame() {
+    requestAnimationFrame(frame);
+    var dt = Math.min(clock.getDelta(), 0.05) * timeScale;
+    T += dt;
+    uniforms.uTime.value = T;
+
+    targetLevel = computeTarget(T);
+    level += (targetLevel - level) * Math.min(1, dt * 9);
+    uniforms.uLevel.value = level;
+
+    if (!dragging) { velX *= 0.94; velY *= 0.94; rotY += velY + dt * 0.10; rotX += velX; }
+    root.rotation.set(rotX, rotY, 0);
+
+    for (var i = 0; i < rings.length; i++) {
+      var r = rings[i];
+      r.spin.rotation.z += r.speed * dt * (1 + level * 1.6);
+      r.tilt.rotation.x += r.drift[0] * dt;
+      r.tilt.rotation.y += r.drift[1] * dt;
+    }
+
+    for (var k = 0; k < RAY_N; k++) {
+      var d = rays.dir[k];
+      var flick = 0.72 + 0.28 * Math.sin(T * rays.speed[k] + rays.phase[k]);
+      var L = rays.base[k] * flick * (1 + level * 0.9);
+      var r0 = 0.04;
+      rayLinePos[k*6]   = d[0]*r0; rayLinePos[k*6+1] = d[1]*r0; rayLinePos[k*6+2] = d[2]*r0;
+      rayLinePos[k*6+3] = d[0]*L;  rayLinePos[k*6+4] = d[1]*L;  rayLinePos[k*6+5] = d[2]*L;
+      for (var j = 0; j < RAY_PTS; j++) {
+        var idx = k * RAY_PTS + j;
+        var t = rays.t[idx];
+        var rr = r0 + (L - r0) * Math.pow(t, 1.25);
+        rayPtPos[idx*3]   = d[0]*rr;
+        rayPtPos[idx*3+1] = d[1]*rr;
+        rayPtPos[idx*3+2] = d[2]*rr;
+      }
+    }
+    rayLine.geometry.attributes.position.needsUpdate = true;
+    rayPoints.geometry.attributes.position.needsUpdate = true;
+
+    streaks.mesh.rotation.y = -T * 0.05;
+    streaks.mesh.rotation.z = T * 0.02;
+    var sc = 1 + level * 0.12 + 0.015 * Math.sin(T * 1.3);
+    streaks.mesh.scale.setScalar(sc);
+    streaks.mesh.material.opacity = 0.55 + level * 0.45;
+
+    var pulse = 1 + 0.06 * Math.sin(T * 3.1) + level * 0.55;
+    core.scale.setScalar(0.55 * pulse);
+    halo.scale.setScalar(2.1 * pulse);
+    flare.scale.setScalar(4.2 + level * 1.8);
+    flare.material.opacity = 0.18 + level * 0.3;
+
+    renderer.render(scene, camera);
+
+    if (T - lastReadout > 0.08) {
+      lastReadout = T;
+      var pct = Math.round(level * 100);
+      if (rdLevel) rdLevel.textContent = pct;
+      if (rdMeter) rdMeter.style.width = pct + '%';
+    }
+  }
+  frame();
+})();
+</script>

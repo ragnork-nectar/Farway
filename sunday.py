@@ -1,17 +1,11 @@
 """
-Sunday v23 — Full Assistant + HUD (Separate Process)
+Sunday v33 — Full Assistant + Dual HUD + Tab Key Toggle
 ========================================
-FEATURES:
-- 🎨 HUD (separate process, no threading issues)
-- 🧠 Memory with personalized replies
-- 🗣️ Voice (Zira) + Wake word + Dual mode
-- 🔊 Volume, 📂 Apps, ⏯️ Media, 🔒 System
-- 🎵 Music via pywhatkit
-- 🌐 Websites
-- 📝 File manager
-- 💻 Code generator
-- 🛑 Stop command
-- 🔑 Multi-key Gemini rotation
+- 🎨 Small arc reactor (bottom-right, always-on)
+- 🖥️ Fullscreen Cosmos Orb (wake word pe)
+- ⌨️ Tab key → hide/show fullscreen HUD
+- 🛡️ Anti-echo filter (ignores YouTube/system audio)
+- 🧠 Memory, code gen, volume, apps, files — all intact
 """
 
 import os
@@ -28,6 +22,14 @@ import win32com.client
 import pyautogui
 import psutil
 from dotenv import load_dotenv
+
+# Keyboard listener for Tab key
+try:
+    from pynput import keyboard as pk_keyboard
+    PYNPUT_AVAILABLE = True
+except ImportError:
+    PYNPUT_AVAILABLE = False
+    print("[Setup] pynput not installed — Tab key HUD toggle disabled")
 
 from memory_manager import Memory
 from hud_controller import init_hud
@@ -66,9 +68,6 @@ MEMORY_DIR.mkdir(exist_ok=True)
 load_dotenv(ROOT_DIR / ".env")
 pyautogui.FAILSAFE = False
 
-memory = Memory()
-hud = init_hud(enabled=True)
-
 
 # ============================================================
 # 1) LOAD API KEYS
@@ -91,12 +90,21 @@ for k in API_KEYS:
         _unique.append(k)
 API_KEYS = _unique
 
-print(f"[Setup] Loaded {len(API_KEYS)} API key(s)")
 EXHAUSTED_KEYS = set()
 
 
 # ============================================================
-# 2) WAKE / SLEEP / EXIT / STOP
+# 2) GLOBAL SINGLETONS
+# ============================================================
+memory = None
+hud = None
+speaker = None
+kb_listener = None
+hud_hidden = False   # Track fullscreen HUD visibility
+
+
+# ============================================================
+# 3) WAKE / SLEEP / EXIT
 # ============================================================
 WAKE_PHRASES = [
     "wake up sunday", "hey sunday", "hi sunday", "hello sunday",
@@ -150,7 +158,55 @@ def is_stop_command(text):
 
 
 # ============================================================
-# 3) APP LIBRARY
+# 4) ANTI-ECHO FILTER
+# ============================================================
+KNOWN_COMMAND_KEYWORDS = [
+    "open", "khol", "launch", "start", "chalu", "close", "band",
+    "volume", "awaaz", "aawaz", "sound", "mute", "unmute",
+    "screenshot", "screen shot", "lock", "shutdown", "restart", "reboot",
+    "sleep pc", "cancel",
+    "play", "baja", "sunao", "gaana", "song", "pause", "resume",
+    "next", "previous", "prev", "pichla", "stop music",
+    "file", "folder", "code", "make", "create", "write", "likh",
+    "read", "delete", "run", "fix", "debug", "improve",
+    "calculator", "website", "program", "script",
+    "name", "mera naam", "remember", "yaad", "forget", "bhool",
+    "know about me",
+    "time", "date", "samay", "tareekh",
+    "bye", "goodbye", "good bye", "sleep",
+    "stop", "chup", "ruk",
+]
+
+SYSTEM_AUDIO_NOISE = [
+    "subscribe", "like and", "share", "comment", "click",
+    "video", "channel", "notification", "bell", "button",
+    "thanks for watching", "watch", "playlist", "next video",
+    "intro", "outro", "sponsor", "like this video",
+    "welcome back", "guys", "hello everyone",
+]
+
+
+def is_command_like(text):
+    t = text.lower().strip()
+    return any(kw in t for kw in KNOWN_COMMAND_KEYWORDS)
+
+
+def is_system_noise(text):
+    if not text:
+        return True
+    t = text.lower().strip()
+    if len(t) < 3:
+        return True
+    if len(t.split()) > 15:
+        return True
+    for noise in SYSTEM_AUDIO_NOISE:
+        if noise in t:
+            return True
+    return False
+
+
+# ============================================================
+# 5) APP LIBRARY
 # ============================================================
 APPS = {
     "chrome": "chrome", "google chrome": "chrome",
@@ -176,29 +232,34 @@ APPS = {
 
 
 # ============================================================
-# 4) VOICE
+# 6) VOICE
 # ============================================================
-print("[Setup] Initializing voice...")
-speaker = win32com.client.Dispatch("SAPI.SpVoice")
-speaker.Rate = 0
+def init_speaker():
+    global speaker
+    print("[Setup] Initializing voice...")
+    speaker = win32com.client.Dispatch("SAPI.SpVoice")
+    speaker.Rate = 0
 
-FEMALE_VOICE_KEYWORDS = ["zira", "heera", "hazel", "susan", "samantha", "female"]
-sapi_voices = speaker.GetVoices()
-female_set = False
+    FEMALE_VOICE_KEYWORDS = ["zira", "heera", "hazel", "susan", "samantha", "female"]
+    sapi_voices = speaker.GetVoices()
+    for keyword in FEMALE_VOICE_KEYWORDS:
+        for i in range(sapi_voices.Count):
+            v = sapi_voices.Item(i)
+            desc = v.GetDescription()
+            if keyword in desc.lower():
+                speaker.Voice = v
+                print(f"[Setup] Female voice: {desc}")
+                return
 
-for keyword in FEMALE_VOICE_KEYWORDS:
-    for i in range(sapi_voices.Count):
-        v = sapi_voices.Item(i)
-        desc = v.GetDescription()
-        if keyword in desc.lower():
-            speaker.Voice = v
-            print(f"[Setup] Female voice: {desc}")
-            female_set = True
-            break
-    if female_set:
-        break
 
 STOP_FLAG = threading.Event()
+
+
+def kill_speech():
+    try:
+        speaker.Speak("", 3)
+    except Exception:
+        pass
 
 
 def speak(text, allow_stop=False):
@@ -206,14 +267,24 @@ def speak(text, allow_stop=False):
         return
     print(f"[Sunday] {text}")
 
-    hud.set_state("speaking")
+    if hud:
+        try:
+            hud.set_state("speaking")
+            hud.set_text(text)
+        except Exception:
+            pass
 
     if not allow_stop:
         try:
             speaker.Speak(text)
         except Exception as ex:
             print(f"[TTS Error] {ex}")
-        hud.set_state("idle")
+        if hud:
+            try:
+                hud.set_state("idle")
+                hud.set_text("")
+            except Exception:
+                pass
         return
 
     STOP_FLAG.clear()
@@ -242,10 +313,7 @@ def speak(text, allow_stop=False):
                             ).lower()
                             if is_stop_command(text_heard):
                                 STOP_FLAG.set()
-                                try:
-                                    speaker.Speak("", 3)
-                                except Exception:
-                                    pass
+                                kill_speech()
                                 break
                         except (sr.UnknownValueError, sr.RequestError):
                             continue
@@ -260,11 +328,67 @@ def speak(text, allow_stop=False):
     t_listener.start()
     t_speak.join(timeout=60)
     speech_done.set()
-    hud.set_state("idle")
+    if hud:
+        try:
+            hud.set_state("idle")
+            hud.set_text("")
+        except Exception:
+            pass
 
 
 # ============================================================
-# 5) VOLUME
+# 7) KEYBOARD LISTENER — Tab to hide/show HUD
+# ============================================================
+def start_keyboard_listener():
+    """Listen for Tab key. Toggle fullscreen HUD visibility."""
+    global hud_hidden
+
+    if not PYNPUT_AVAILABLE:
+        print("[Keyboard] pynput not available — skipping")
+        return None
+
+    def on_press(key):
+        global hud_hidden
+        try:
+            if key == pk_keyboard.Key.tab:
+                if hud:
+                    if not hud_hidden:
+                        try:
+                            hud.hide_fullscreen()
+                        except Exception:
+                            pass
+                        hud_hidden = True
+                        print("\n[Keyboard] Tab — HUD hidden (Tab again to show)\n")
+                    else:
+                        try:
+                            hud.show_fullscreen()
+                        except Exception:
+                            pass
+                        hud_hidden = False
+                        print("\n[Keyboard] Tab — HUD shown\n")
+            elif key == pk_keyboard.Key.esc:
+                if hud:
+                    try:
+                        hud.hide_fullscreen()
+                    except Exception:
+                        pass
+                hud_hidden = True
+                print("\n[Keyboard] Esc — HUD hidden\n")
+        except Exception:
+            pass
+
+    def on_release(key):
+        pass
+
+    listener = pk_keyboard.Listener(on_press=on_press, on_release=on_release)
+    listener.daemon = True
+    listener.start()
+    print("[Keyboard] Tab key listener active — Tab to hide/show HUD")
+    return listener
+
+
+# ============================================================
+# 8) VOLUME
 # ============================================================
 def get_volume_interface():
     if not VOLUME_AVAILABLE:
@@ -329,7 +453,7 @@ def volume_mute():
 
 
 # ============================================================
-# 6) APP CONTROL
+# 9) APP CONTROL
 # ============================================================
 def open_app_smart(app_name):
     key = app_name.lower().strip()
@@ -379,7 +503,7 @@ def close_app(app_name):
 
 
 # ============================================================
-# 7) MEDIA
+# 10) MEDIA
 # ============================================================
 def media_play_pause():
     pyautogui.press("playpause")
@@ -402,7 +526,7 @@ def media_stop():
 
 
 # ============================================================
-# 8) SYSTEM
+# 11) SYSTEM
 # ============================================================
 def system_lock():
     import ctypes
@@ -448,9 +572,14 @@ def system_screenshot():
 
 
 # ============================================================
-# 9) MUSIC
+# 12) MUSIC
 # ============================================================
 def play_song(song_name):
+    if hud:
+        try:
+            hud.set_now_playing(f"Playing: {song_name}")
+        except Exception:
+            pass
     if PYWHATKIT_AVAILABLE:
         try:
             pywhatkit.playonyt(song_name)
@@ -463,7 +592,7 @@ def play_song(song_name):
 
 
 # ============================================================
-# 10) FILE MANAGER
+# 13) FILE MANAGER
 # ============================================================
 def _resolve_user_path(filename, code=False):
     filename = filename.strip().strip('"').strip("'")
@@ -590,9 +719,11 @@ def open_code_folder():
 
 
 # ============================================================
-# 10.5) MEMORY AUTO-DETECTION
+# 14) MEMORY AUTO-DETECTION
 # ============================================================
 def detect_and_save_memory(text):
+    if memory is None:
+        return False
     t = text.lower().strip()
     saved = False
 
@@ -646,7 +777,7 @@ def detect_and_save_memory(text):
 
 
 # ============================================================
-# 11) MULTI-KEY GEMINI
+# 15) MULTI-KEY GEMINI
 # ============================================================
 CODE_GEN_SYSTEM = (
     "You are an expert programmer. The user wants you to write code. "
@@ -710,7 +841,12 @@ def _call_gemini(prompt, max_attempts_per_key=2):
     except ImportError:
         return None
 
-    hud.set_state("thinking")
+    if hud:
+        try:
+            hud.set_state("thinking")
+            hud.set_text("Let me think...")
+        except Exception:
+            pass
 
     models_to_try = ["gemini-flash-latest", "gemini-3.8-flash", "gemini-2.5-flash"]
 
@@ -737,7 +873,12 @@ def _call_gemini(prompt, max_attempts_per_key=2):
                     text = (response.text or "").strip()
                     if text:
                         print(f"[AI] ✅ Success with key #{key_index + 1}, {len(text)} chars")
-                        hud.set_state("idle")
+                        if hud:
+                            try:
+                                hud.set_state("idle")
+                                hud.set_text("")
+                            except Exception:
+                                pass
                         return text
                     else:
                         time.sleep(1)
@@ -760,12 +901,17 @@ def _call_gemini(prompt, max_attempts_per_key=2):
                 break
 
     print("[AI] ❌ All API keys exhausted")
-    hud.set_state("idle")
+    if hud:
+        try:
+            hud.set_state("idle")
+            hud.set_text("")
+        except Exception:
+            pass
     return None
 
 
 # ============================================================
-# 12) CODE GENERATION
+# 16) CODE GENERATION
 # ============================================================
 def ai_generate_code(description):
     print(f"\n[CodeGen] Generating code for: {description}")
@@ -837,7 +983,7 @@ def detect_filename(description):
 
 
 # ============================================================
-# 13) INTENT DETECTION
+# 17) INTENT DETECTION
 # ============================================================
 CODE_CREATE_TRIGGERS = [
     "make a", "make me", "create a", "create me", "write a", "write me",
@@ -892,7 +1038,7 @@ def is_code_run_request(text):
 
 
 # ============================================================
-# 14) CODE WORKFLOWS
+# 18) CODE WORKFLOWS
 # ============================================================
 def workflow_generate_code(description):
     speak("Let me write that code for you")
@@ -995,7 +1141,7 @@ def workflow_run_code(filename):
 
 
 # ============================================================
-# 15) COMMAND HANDLER
+# 19) COMMAND HANDLER
 # ============================================================
 def process_command(c):
     c = c.lower().strip()
@@ -1003,12 +1149,20 @@ def process_command(c):
     print(f"[You] {original}")
     words = c.split()
 
+    if is_system_noise(c):
+        print(f"[Filter] Ignored system audio: '{c}'")
+        return
+
+    if not is_command_like(c):
+        print(f"[Filter] No command keyword — ignoring: '{c}'")
+        return
+
     if is_stop_command(c):
         speak("Okay, stopped.")
         return
 
     if detect_and_save_memory(original):
-        name = memory.get_profile("name")
+        name = memory.get_profile("name") if memory else None
         if name:
             speak(f"Got it, I will remember that, {name.split()[0]}")
         else:
@@ -1016,7 +1170,7 @@ def process_command(c):
         return
 
     if "what is my name" in c or "mera naam kya" in c or "what's my name" in c:
-        name = memory.get_profile("name")
+        name = memory.get_profile("name") if memory else None
         if name:
             speak(f"Your name is {name}")
         else:
@@ -1024,6 +1178,9 @@ def process_command(c):
         return
 
     if "what do you know about me" in c or "mere baare mein" in c:
+        if not memory:
+            speak("Memory not available.")
+            return
         profile = memory.get_profile()
         facts = memory.get_facts(limit=10)
         if not profile and not facts:
@@ -1039,21 +1196,22 @@ def process_command(c):
 
     if c.startswith("remember ") or c.startswith("yaad rakho "):
         fact = c.replace("remember ", "").replace("yaad rakho ", "").strip()
-        if fact:
+        if fact and memory:
             memory.add_fact(fact)
             speak(f"Okay, I will remember: {fact}")
         return
 
     if c.startswith("forget ") or c.startswith("bhool jao "):
         what = c.replace("forget ", "").replace("bhool jao ", "").strip()
-        if memory.delete_profile(what):
+        if memory and memory.delete_profile(what):
             speak(f"Forgot {what}")
         else:
             speak(f"I do not have {what} in memory")
         return
 
     if "forget everything" in c or "clear memory" in c or "sab bhool jao" in c:
-        memory.clear_all()
+        if memory:
+            memory.clear_all()
         speak("All memory cleared")
         return
 
@@ -1295,7 +1453,7 @@ def process_command(c):
     # UNKNOWN → AI
     if API_KEYS:
         speak("Let me think")
-        memory_context = memory.build_context()
+        memory_context = memory.build_context() if memory else ""
         prompt = (
             "You are Sunday, a helpful female voice assistant. "
             "Answer in 1-2 short sentences suitable for voice. "
@@ -1304,11 +1462,13 @@ def process_command(c):
             prompt += f"\n\nMemory about user:\n{memory_context}\n"
         prompt += f"\nQuestion: {c}"
         raw = _call_gemini(prompt)
-        memory.add_message("user", c)
+        if memory:
+            memory.add_message("user", c)
         if raw:
             parts = [p.strip() for p in raw.split(".") if p.strip()]
             short = ". ".join(parts[:2]) + "." if parts else raw[:200]
-            memory.add_message("assistant", short)
+            if memory:
+                memory.add_message("assistant", short)
             speak(short, allow_stop=True)
         else:
             speak("Sorry, all API keys are exhausted.")
@@ -1317,17 +1477,26 @@ def process_command(c):
 
 
 # ============================================================
-# 16) MAIN LOOP
+# 20) MAIN ENTRY
 # ============================================================
-if __name__ == "__main__":
+def main():
+    global memory, hud, kb_listener
+
     print("\n" + "=" * 60)
-    print("  Sunday — v23 (Full Assistant + HUD)")
+    print("  Sunday — v33 (Tab Key Toggle + Anti-Echo)")
     print("=" * 60)
+
+    memory = Memory()
+    init_speaker()
+    hud = init_hud(enabled=True, fullscreen=True)
+
+    # Start Tab key listener
+    kb_listener = start_keyboard_listener()
+
     speak("Sunday is ready. Say wake up Sunday to activate me.")
+
     print("=" * 60)
-    print(f"[Sunday] User files: {USER_FILES_DIR}")
-    print(f"[Sunday] Memory folder: {MEMORY_DIR}")
-    print(f"[Sunday] API keys loaded: {len(API_KEYS)}")
+    print(f"[Sunday] API keys: {len(API_KEYS)}")
     print(f"[Sunday] HUD: {'enabled' if hud and hud.enabled else 'disabled'}")
 
     current_name = memory.get_profile("name")
@@ -1336,17 +1505,24 @@ if __name__ == "__main__":
     print("=" * 60)
 
     recognizer = sr.Recognizer()
+    recognizer.energy_threshold = 4000
+    recognizer.dynamic_energy_threshold = False
+    recognizer.pause_threshold = 0.6
+    recognizer.phrase_threshold = 0.4
+    recognizer.non_speaking_duration = 0.4
+
     mic = sr.Microphone()
 
     with mic as source:
-        print("[Sunday] Calibrating mic...")
-        recognizer.adjust_for_ambient_noise(source, duration=1)
+        print("[Sunday] Calibrating mic (stay quiet 2s)...")
+        recognizer.adjust_for_ambient_noise(source, duration=2)
+        print(f"[Sunday] Energy threshold: {recognizer.energy_threshold}")
 
     print("\n😴 SLEEP MODE — Say 'Wake up Sunday'")
-    print("🧠 Say 'Mera naam X hai' → memory saves")
-    print("💻 Say 'Make a Python calculator' → auto-code!")
+    print("⌨️  Tab key → hide/show fullscreen HUD")
     print("👋 Say 'Bye Sunday' → sleep")
-    print("🚪 Say 'Goodbye' → exit\n")
+    print("🚪 Say 'Goodbye' → exit")
+    print("🛡️  Anti-echo filter: ON\n")
 
     mode = "sleep"
 
@@ -1354,11 +1530,19 @@ if __name__ == "__main__":
         try:
             with mic as source:
                 if mode == "sleep":
-                    hud.set_state("idle")
+                    if hud:
+                        try:
+                            hud.set_state("idle")
+                        except Exception:
+                            pass
                     audio = recognizer.listen(source, timeout=8, phrase_time_limit=4)
                 else:
-                    hud.set_state("listening")
-                    audio = recognizer.listen(source, timeout=6, phrase_time_limit=10)
+                    if hud:
+                        try:
+                            hud.set_state("listening")
+                        except Exception:
+                            pass
+                    audio = recognizer.listen(source, timeout=6, phrase_time_limit=8)
 
             try:
                 text = recognizer.recognize_google(audio, language="en-IN").lower()
@@ -1375,11 +1559,23 @@ if __name__ == "__main__":
             if mode == "sleep":
                 if is_exit(text):
                     speak("Goodbye")
+                    if hud:
+                        try:
+                            hud.hide_fullscreen()
+                        except Exception:
+                            pass
                     print("\n🚪 Sunday exiting...\n")
                     break
                 if is_wake(text):
                     mode = "command"
-                    name = memory.get_profile("name")
+                    if hud:
+                        try:
+                            hud.show_fullscreen()
+                        except Exception:
+                            pass
+                    # Reset hidden flag when we explicitly show
+                    globals()['hud_hidden'] = False
+                    name = memory.get_profile("name") if memory else None
                     if name:
                         speak(f"Yes {name.split()[0]}, I'm listening")
                     else:
@@ -1390,10 +1586,20 @@ if __name__ == "__main__":
             if mode == "command":
                 if is_exit(text):
                     speak("Goodbye")
+                    if hud:
+                        try:
+                            hud.hide_fullscreen()
+                        except Exception:
+                            pass
                     print("\n🚪 Sunday exiting...\n")
                     break
                 if is_sleep(text):
                     speak("Okay, going back to sleep")
+                    if hud:
+                        try:
+                            hud.hide_fullscreen()
+                        except Exception:
+                            pass
                     mode = "sleep"
                     print("\n😴 SLEEP MODE\n")
                     continue
@@ -1405,5 +1611,40 @@ if __name__ == "__main__":
             print("\n[Sunday] Ctrl+C — Stopping...")
             break
         except Exception as e:
-            print(f"[Error] {e}")
+            err_msg = str(e)
+            if "'NoneType' object has no attribute" in err_msg:
+                continue
+            if "Tcl" in err_msg or "mainloop" in err_msg:
+                continue
+            print(f"[Error] {err_msg}")
             continue
+
+    print("\n🚪 Sunday stopped.\n")
+
+    # Cleanup
+    try:
+        if kb_listener:
+            try:
+                kb_listener.stop()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        if hud:
+            try:
+                hud.hide_fullscreen()
+            except Exception:
+                pass
+            try:
+                hud.stop()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    os._exit(0)
+
+
+if __name__ == "__main__":
+    main()
