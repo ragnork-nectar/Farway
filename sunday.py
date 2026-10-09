@@ -1,10 +1,10 @@
 """
-Sunday v17 — Full PC Assistant + Code Generator
+Sunday v19 — Multi-API Key Rotation
 ========================================
 NEW:
-- Auto code generator (Python, HTML, CSS, JS)
-- Auto bug fixer
-- Auto code improver
+- Automatic rotation between multiple Gemini API keys
+- If one key exhausts quota → next key
+- Keys loaded from .env (GEMINI_API_KEY_1, _2, _3...)
 - All previous features intact
 """
 
@@ -57,7 +57,38 @@ pyautogui.FAILSAFE = False
 
 
 # ============================================================
-# 1) WAKE / SLEEP / EXIT / STOP
+# 1) LOAD ALL API KEYS
+# ============================================================
+API_KEYS = []
+
+# Load numbered keys: GEMINI_API_KEY_1, _2, _3...
+for i in range(1, 20):
+    key = os.getenv(f"GEMINI_API_KEY_{i}")
+    if key and key.strip():
+        API_KEYS.append(key.strip())
+
+# Also support single GEMINI_API_KEY (backward compatible)
+single_key = os.getenv("GEMINI_API_KEY")
+if single_key and single_key.strip():
+    API_KEYS.append(single_key.strip())
+
+# Remove duplicates preserving order
+_seen = set()
+_unique = []
+for k in API_KEYS:
+    if k not in _seen:
+        _seen.add(k)
+        _unique.append(k)
+API_KEYS = _unique
+
+print(f"[Setup] Loaded {len(API_KEYS)} API key(s)")
+
+# Track exhausted keys (in-memory for this session)
+EXHAUSTED_KEYS = set()
+
+
+# ============================================================
+# 2) WAKE / SLEEP / EXIT / STOP
 # ============================================================
 WAKE_PHRASES = [
     "wake up sunday", "hey sunday", "hi sunday", "hello sunday",
@@ -111,23 +142,6 @@ def is_stop_command(text):
 
 
 # ============================================================
-# 2) LOAD API KEY
-# ============================================================
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-gemini_client = None
-
-if GEMINI_KEY:
-    try:
-        from google import genai
-        gemini_client = genai.Client(api_key=GEMINI_KEY)
-        print("[Setup] Gemini AI ready")
-    except Exception as e:
-        print(f"[Setup] Gemini init failed: {e}")
-else:
-    print("[Setup] No GEMINI_API_KEY")
-
-
-# ============================================================
 # 3) APP LIBRARY
 # ============================================================
 APPS = {
@@ -147,8 +161,8 @@ APPS = {
     "word": "winword", "excel": "excel", "powerpoint": "powerpnt",
     "outlook": "outlook", "camera": "microsoft.windows.camera:",
     "photos": "ms-photos:", "clock": "ms-clock:",
-    "store": "ms-windows-store:", "settings": "ms-settings:",
-    "photoshop": "photoshop", "notion": "notion", "obsidian": "obsidian",
+    "store": "ms-windows-store:", "photoshop": "photoshop",
+    "notion": "notion", "obsidian": "obsidian",
     "docker": "docker", "postman": "postman",
 }
 
@@ -564,115 +578,173 @@ def open_code_folder():
 
 
 # ============================================================
-# 11) AI BRAIN + CODE GENERATOR
+# 11) MULTI-KEY GEMINI CALL
 # ============================================================
 CODE_GEN_SYSTEM = (
-    "You are Sunday, an expert programmer. The user wants you to WRITE CODE for them. "
-    "Rules:\n"
-    "1. Output ONLY the code, no explanations, no markdown, no ```code fences```.\n"
-    "2. Start code with a comment saying what it does.\n"
-    "3. Make code clean, working, and well-commented.\n"
-    "4. For Python: use if __name__ == '__main__': main() pattern.\n"
-    "5. For HTML: complete boilerplate with <!DOCTYPE html>.\n"
-    "6. For CSS: complete styling.\n"
-    "7. For JS: modern ES6 syntax.\n"
-    "8. Do not say anything else — code only."
+    "You are an expert programmer. The user wants you to write code. "
+    "Output ONLY the code, no explanations, no markdown, no ``` fences. "
+    "Start code with a comment describing what it does. "
+    "Make code clean, working, and well-commented. "
+    "Code only — no prose, no greetings."
 )
 
 CODE_FIX_SYSTEM = (
-    "You are Sunday, an expert debugger. The user will give you buggy code. "
-    "Rules:\n"
-    "1. Output ONLY the fixed code, no explanations, no markdown fences.\n"
-    "2. Fix all bugs and issues.\n"
-    "3. Keep the original intent.\n"
-    "4. Add comments where you fixed something.\n"
-    "5. Code only, nothing else."
+    "You are an expert debugger. Fix the bugs in the code. "
+    "Output ONLY the fixed code, no explanations, no markdown fences. "
+    "Keep original intent. Code only."
 )
 
 CODE_IMPROVE_SYSTEM = (
-    "You are Sunday, a senior developer. The user will give you code to improve. "
-    "Rules:\n"
-    "1. Output ONLY the improved code, no explanations, no markdown fences.\n"
-    "2. Improve readability, add docstrings, better variable names.\n"
-    "3. Keep functionality same.\n"
-    "4. Code only, nothing else."
+    "You are a senior developer. Improve the code. "
+    "Output ONLY the improved code, no explanations, no markdown fences. "
+    "Keep functionality same. Code only."
 )
 
 
 def _extract_code(raw):
-    """Strip markdown fences and return pure code."""
+    if not raw:
+        return ""
     text = raw.strip()
-    # Remove ```python ... ``` or ```html ... ``` etc.
-    text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+    text = re.sub(r"^```[a-zA-Z0-9+\-]*\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
-    return text.strip()
+    text = text.strip("`").strip()
+    return text
 
 
-def ai_generate_code(description):
-    """Generate code from natural language description."""
-    if not gemini_client:
+def _get_available_keys():
+    """Return list of non-exhausted keys, ordered."""
+    available = [k for k in API_KEYS if k not in EXHAUSTED_KEYS]
+    # If all exhausted, return all (allow retry — maybe reset happened)
+    if not available:
+        print("[AI] All keys marked exhausted — resetting and trying all")
+        EXHAUSTED_KEYS.clear()
+        available = list(API_KEYS)
+    return available
+
+
+def _is_quota_error(err_lower):
+    """Check if error is a quota/rate-limit error."""
+    return any(k in err_lower for k in (
+        "429", "quota", "exceeded", "resource_exhausted",
+        "rate limit", "rate-limit", "too many requests",
+    ))
+
+
+def _is_server_busy(err_lower):
+    """Check if error is a temporary server busy error."""
+    return any(k in err_lower for k in (
+        "503", "unavailable", "overloaded", "internal",
+    ))
+
+
+def _call_gemini(prompt, max_attempts_per_key=2):
+    """
+    Call Gemini with automatic key rotation.
+    Tries each available key until one works.
+    """
+    if not API_KEYS:
+        print("[AI] No API keys configured")
         return None
-    prompt = f"{CODE_GEN_SYSTEM}\n\nTask: {description}"
-    for model_name in ["gemini-flash-latest", "gemini-3.8-flash"]:
+
+    try:
+        from google import genai
+    except ImportError:
+        print("[AI] google-genai not installed")
+        return None
+
+    models_to_try = ["gemini-flash-latest", "gemini-3.8-flash", "gemini-2.5-flash"]
+
+    # Try each available key
+    for key_index, api_key in enumerate(_get_available_keys()):
+        short_key = api_key[-8:] if len(api_key) > 8 else api_key
+        print(f"\n[AI] Trying key #{key_index + 1} (...{short_key})")
+
         try:
-            response = gemini_client.models.generate_content(
-                model=model_name, contents=prompt,
-            )
-            code = _extract_code(response.text or "")
-            if code:
-                return code
+            client = genai.Client(api_key=api_key)
         except Exception as e:
-            err_lower = str(e).lower()
-            if any(k in err_lower for k in ("503", "unavailable", "429")):
-                time.sleep(2)
-                continue
+            print(f"[AI] Client init failed for this key: {e}")
+            EXHAUSTED_KEYS.add(api_key)
+            continue
+
+        key_exhausted = False
+
+        for model_name in models_to_try:
+            for attempt in range(max_attempts_per_key):
+                try:
+                    print(f"[AI]   → {model_name} (attempt {attempt + 1})")
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                    )
+                    text = (response.text or "").strip()
+                    if text:
+                        print(f"[AI] ✅ Success with key #{key_index + 1} ({model_name}), {len(text)} chars")
+                        return text
+                    else:
+                        print(f"[AI]   Empty response, retrying")
+                        time.sleep(1)
+                        continue
+
+                except Exception as e:
+                    err_lower = str(e).lower()
+
+                    if _is_quota_error(err_lower):
+                        print(f"[AI]   ❌ Quota exhausted on this key ({model_name})")
+                        EXHAUSTED_KEYS.add(api_key)
+                        key_exhausted = True
+                        break
+
+                    if _is_server_busy(err_lower):
+                        print(f"[AI]   ⏳ Server busy, retrying in 2s...")
+                        time.sleep(2)
+                        continue
+
+                    # Other error (bad model, etc.)
+                    print(f"[AI]   ⚠️  Error: {str(e)[:100]}")
+                    break
+
+            if key_exhausted:
+                break
+
+        if not key_exhausted:
+            # Non-quota error on this key — move to next key anyway
+            print(f"[AI] Key #{key_index + 1} failed for other reasons, trying next...")
+
+    print("[AI] ❌ All API keys exhausted or failed")
     return None
+
+
+# ============================================================
+# 12) CODE GENERATION (using rotated keys)
+# ============================================================
+def ai_generate_code(description):
+    print(f"\n[CodeGen] Generating code for: {description}")
+    prompt = f"{CODE_GEN_SYSTEM}\n\nTask: {description}"
+    raw = _call_gemini(prompt)
+    if not raw:
+        print("[CodeGen] Primary failed, trying simple fallback...")
+        simple = f"Write complete working code for: {description}. Output only code."
+        raw = _call_gemini(simple)
+    if not raw:
+        return None
+    code = _extract_code(raw)
+    print(f"[CodeGen] Extracted {len(code)} chars")
+    return code if code else None
 
 
 def ai_fix_code(code):
-    """Fix bugs in given code."""
-    if not gemini_client:
-        return None
-    prompt = f"{CODE_FIX_SYSTEM}\n\nHere is the buggy code:\n\n{code}"
-    for model_name in ["gemini-flash-latest", "gemini-3.8-flash"]:
-        try:
-            response = gemini_client.models.generate_content(
-                model=model_name, contents=prompt,
-            )
-            fixed = _extract_code(response.text or "")
-            if fixed:
-                return fixed
-        except Exception as e:
-            err_lower = str(e).lower()
-            if any(k in err_lower for k in ("503", "unavailable", "429")):
-                time.sleep(2)
-                continue
-    return None
+    prompt = f"{CODE_FIX_SYSTEM}\n\nBuggy code:\n\n{code}"
+    raw = _call_gemini(prompt)
+    return _extract_code(raw) if raw else None
 
 
 def ai_improve_code(code):
-    """Improve given code."""
-    if not gemini_client:
-        return None
-    prompt = f"{CODE_IMPROVE_SYSTEM}\n\nHere is the code:\n\n{code}"
-    for model_name in ["gemini-flash-latest", "gemini-3.8-flash"]:
-        try:
-            response = gemini_client.models.generate_content(
-                model=model_name, contents=prompt,
-            )
-            improved = _extract_code(response.text or "")
-            if improved:
-                return improved
-        except Exception as e:
-            err_lower = str(e).lower()
-            if any(k in err_lower for k in ("503", "unavailable", "429")):
-                time.sleep(2)
-                continue
-    return None
+    prompt = f"{CODE_IMPROVE_SYSTEM}\n\nCode:\n\n{code}"
+    raw = _call_gemini(prompt)
+    return _extract_code(raw) if raw else None
 
 
 def detect_language(description):
-    """Detect programming language from description."""
     d = description.lower()
     if "python" in d or ".py" in d:
         return "py"
@@ -688,49 +760,45 @@ def detect_language(description):
         return "cpp"
     if "c#" in d:
         return "cs"
-    return "py"  # default
+    return "py"
 
 
 def detect_filename(description):
-    """Extract or generate filename from description."""
-    # Look for explicit filename
-    match = re.search(r"in\s+([\w\-\.]+\.\w+)", description)
-    if match:
-        return match.group(1)
-    match = re.search(r"called\s+([\w\-\.]+\.\w+)", description)
-    if match:
-        return match.group(1)
-    match = re.search(r"named\s+([\w\-\.]+\.\w+)", description)
-    if match:
-        return match.group(1)
-    # Generate from description
+    for pattern in [
+        r"in\s+([\w\-\.]+\.\w+)",
+        r"called\s+([\w\-\.]+\.\w+)",
+        r"named\s+([\w\-\.]+\.\w+)",
+        r"file\s+([\w\-\.]+\.\w+)",
+    ]:
+        match = re.search(pattern, description, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
     ext = detect_language(description)
-    # Slugify
     slug = re.sub(r"[^\w\s]", "", description.lower())
     words = [w for w in slug.split() if w not in (
         "make", "create", "write", "build", "a", "an", "the", "me",
         "please", "code", "program", "script", "file", "in", "called",
         "named", "for", "python", "html", "css", "javascript", "js",
+        "using", "with",
     )]
     name = "_".join(words[:3]) or "generated"
     return f"{name}.{ext}"
 
 
 # ============================================================
-# 12) CODE INTENT DETECTION
+# 13) INTENT DETECTION
 # ============================================================
 CODE_CREATE_TRIGGERS = [
     "make a", "make me", "create a", "create me", "write a", "write me",
-    "build a", "build me", "generate a", "generate me", "code a", "code me",
-    "banao", "bana do", "likho", "likh do", "make a python", "make a html",
-    "make a css", "make a javascript", "write code", "code likho",
+    "build a", "build me", "generate a", "generate me",
+    "banao", "bana do", "likho", "likh do", "code likho",
     "program banao", "script banao", "program likho", "script likho",
 ]
 
 CODE_FIX_TRIGGERS = [
     "fix the bug", "fix bug", "fix code", "fix error", "debug",
-    "theek karo", "thik karo", "sahi karo", "fix karo",
-    "bug fix", "bug theek",
+    "theek karo", "thik karo", "sahi karo", "fix karo", "bug fix",
 ]
 
 CODE_IMPROVE_TRIGGERS = [
@@ -739,24 +807,24 @@ CODE_IMPROVE_TRIGGERS = [
     "clean code", "optimize",
 ]
 
-CODE_OPEN_TRIGGERS = [
+CODE_RUN_TRIGGERS = [
     "run the code", "run code", "execute", "chalao", "run karo",
-    "run the file", "run file",
+    "run the file", "run file", "chala do",
 ]
 
 
 def is_code_create_request(text):
     t = text.lower()
-    # Must have a creation trigger
     has_trigger = any(trig in t for trig in CODE_CREATE_TRIGGERS)
     if not has_trigger:
         return False
-    # Should mention a language or a "code-like" noun
     code_words = [
-        "python", "html", "css", "javascript", "js",
-        "code", "program", "script", "calculator", "website",
-        "game", "app", "function", "class", "bot", "tool",
-        "calculator", "todo", "timer", "clock", "guess",
+        "python", "html", "css", "javascript", "js", "java", "c++",
+        "code", "program", "script",
+        "calculator", "website", "game", "app", "tool",
+        "todo", "timer", "clock", "guess", "snake", "form",
+        "login", "portfolio", "blog", "counter", "converter",
+        "function", "class", "bot", "scraper", "downloader",
     ]
     return any(w in t for w in code_words)
 
@@ -770,18 +838,17 @@ def is_code_improve_request(text):
 
 
 def is_code_run_request(text):
-    return any(t in text.lower() for t in CODE_OPEN_TRIGGERS)
+    return any(t in text.lower() for t in CODE_RUN_TRIGGERS)
 
 
 # ============================================================
-# 13) CODE WORKFLOWS
+# 14) CODE WORKFLOWS
 # ============================================================
 def workflow_generate_code(description):
-    """Generate code + save to file."""
     speak("Let me write that code for you")
     code = ai_generate_code(description)
     if not code:
-        speak("Sorry, I couldn't generate the code. Try again.")
+        speak("Sorry, all API keys are exhausted. Try again later.")
         return
 
     filename = detect_filename(description)
@@ -790,24 +857,21 @@ def workflow_generate_code(description):
         path.write_text(code, encoding="utf-8")
         lines = len(code.splitlines())
         speak(f"Done. I wrote {lines} lines of code in {filename}")
-        # Auto-open in VS Code
         try:
             subprocess.Popen(f'code "{path}"', shell=True)
         except Exception:
             pass
         print(f"\n[CODE] Saved to: {path}\n")
         print("=" * 60)
-        print(code[:1000])
+        print(code[:1500])
         print("=" * 60)
     except Exception as e:
         speak(f"Could not save file: {e}")
 
 
 def workflow_fix_code(filename):
-    """Read file, fix bugs, save back."""
     path = _resolve_user_path(filename, code=True)
     if not path.exists():
-        # Try user_files
         path = _resolve_user_path(filename)
         if not path.exists():
             speak(f"File {filename} not found")
@@ -822,7 +886,7 @@ def workflow_fix_code(filename):
     speak("Fixing the bugs")
     fixed = ai_fix_code(original)
     if not fixed:
-        speak("Sorry, could not fix the code. Try again.")
+        speak("Sorry, could not fix the code right now.")
         return
 
     try:
@@ -834,7 +898,6 @@ def workflow_fix_code(filename):
 
 
 def workflow_improve_code(filename):
-    """Improve code in file."""
     path = _resolve_user_path(filename, code=True)
     if not path.exists():
         path = _resolve_user_path(filename)
@@ -851,7 +914,7 @@ def workflow_improve_code(filename):
     speak("Improving the code")
     improved = ai_improve_code(original)
     if not improved:
-        speak("Sorry, could not improve. Try again.")
+        speak("Sorry, could not improve right now.")
         return
 
     try:
@@ -863,7 +926,6 @@ def workflow_improve_code(filename):
 
 
 def workflow_run_code(filename):
-    """Run a Python file."""
     path = _resolve_user_path(filename, code=True)
     if not path.exists():
         path = _resolve_user_path(filename)
@@ -889,7 +951,7 @@ def workflow_run_code(filename):
 
 
 # ============================================================
-# 14) COMMAND HANDLER
+# 15) COMMAND HANDLER
 # ============================================================
 def process_command(c):
     c = c.lower().strip()
@@ -901,21 +963,18 @@ def process_command(c):
         speak("Okay, stopped.")
         return
 
-    # ============ CODE CREATION (highest priority) ============
+    # CODE (highest priority)
     if is_code_create_request(c):
         workflow_generate_code(original)
         return
 
-    # ============ CODE FIX ============
     if is_code_fix_request(c):
-        # Find filename
         fname = None
         for w in words:
             if w.endswith((".py", ".html", ".css", ".js")):
                 fname = w
                 break
         if not fname:
-            # Try after "in" or "the"
             for kw in ("in ", "the "):
                 idx = c.find(kw)
                 if idx != -1:
@@ -927,7 +986,6 @@ def process_command(c):
             speak("Which file should I fix?")
         return
 
-    # ============ CODE IMPROVE ============
     if is_code_improve_request(c):
         fname = None
         for w in words:
@@ -940,7 +998,6 @@ def process_command(c):
             speak("Which file should I improve?")
         return
 
-    # ============ CODE RUN ============
     if is_code_run_request(c):
         fname = None
         for w in words:
@@ -953,7 +1010,7 @@ def process_command(c):
             speak("Which file should I run?")
         return
 
-    # ============ FILE MANAGER ============
+    # FILE MANAGER
     if "open my files" in c or "open user files" in c:
         speak(open_user_files_folder()); return
     if "open code folder" in c or "open my code" in c:
@@ -1042,7 +1099,7 @@ def process_command(c):
         if fname and fname != "file":
             speak(file_delete(fname)); return
 
-    # ============ SYSTEM ============
+    # SYSTEM
     if "cancel" in c and any(k in c for k in ("shutdown", "shut down", "restart")):
         speak(system_cancel_shutdown()); return
     if "shutdown" in c or "shut down" in c:
@@ -1065,7 +1122,7 @@ def process_command(c):
     ]):
         speak(system_screenshot()); return
 
-    # ============ VOLUME ============
+    # VOLUME
     if any(w in c for w in ("volume", "awaaz", "aawaz", "sound")):
         if any(w in c for w in ("up", "increase", "badha", "tez")):
             speak(volume_up()); return
@@ -1080,7 +1137,7 @@ def process_command(c):
                 speak(volume_set(int(w))); return
         speak("Volume up, down, or mute?"); return
 
-    # ============ MEDIA ============
+    # MEDIA
     if "next" in c and ("song" in c or "gaana" in c):
         speak(media_next()); return
     if ("previous" in c or "prev" in c or "pichla" in c) and ("song" in c or "gaana" in c):
@@ -1092,14 +1149,14 @@ def process_command(c):
     if "stop music" in c:
         speak(media_stop()); return
 
-    # ============ CLOSE APP ============
+    # CLOSE
     if any(w in c for w in ("close", "band karo")):
         for app_name in APPS:
             if app_name in c:
                 speak(close_app(app_name)); return
         speak("Which app to close?"); return
 
-    # ============ OPEN APP/WEBSITE ============
+    # OPEN
     site_map = [
         ("youtube", "https://youtube.com", "Opening YouTube"),
         ("google", "https://google.com", "Opening Google"),
@@ -1127,7 +1184,7 @@ def process_command(c):
                         speak(open_app_smart(app_query)); return
         speak("Which app to open?"); return
 
-    # ============ MUSIC ============
+    # MUSIC
     music_triggers = ("play", "baja", "sunao", "gaana", "song")
     if any(t in c for t in music_triggers):
         song_query = ""
@@ -1143,41 +1200,43 @@ def process_command(c):
             speak(media_play_pause()); return
         speak(play_song(song_query)); return
 
-    # ============ TIME / DATE ============
+    # TIME / DATE
     if "time" in c or "samay" in c:
         speak(datetime.now().strftime("It's %I:%M %p")); return
     if "date" in c or "tareekh" in c:
         speak(datetime.now().strftime("Today is %A, %B %d")); return
 
-    # ============ UNKNOWN → AI ============
-    if gemini_client:
+    # UNKNOWN → AI
+    if API_KEYS:
         speak("Let me think")
-        try:
-            response = gemini_client.models.generate_content(
-                model="gemini-flash-latest",
-                contents=f"You are Sunday, a helpful female voice assistant. Answer in 1-2 short sentences suitable for voice. Question: {c}",
-            )
-            answer = (response.text or "").strip()
-            parts = [p.strip() for p in answer.split(".") if p.strip()]
-            short = ". ".join(parts[:2]) + "."
+        prompt = (
+            "You are Sunday, a helpful female voice assistant. "
+            "Answer in 1-2 short sentences suitable for voice. "
+            f"Question: {c}"
+        )
+        raw = _call_gemini(prompt)
+        if raw:
+            parts = [p.strip() for p in raw.split(".") if p.strip()]
+            short = ". ".join(parts[:2]) + "." if parts else raw[:200]
             speak(short, allow_stop=True)
-        except Exception as e:
-            speak(f"AI error: {e}")
+        else:
+            speak("Sorry, all API keys are exhausted.")
     else:
         speak("I didn't understand that")
 
 
 # ============================================================
-# 15) MAIN LOOP
+# 16) MAIN LOOP
 # ============================================================
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("  Sunday — v17 (PC Control + Code Generator)")
+    print("  Sunday — v19 (Multi-Key Rotation)")
     print("=" * 60)
     speak("Sunday is ready. Say wake up Sunday to activate me.")
     print("=" * 60)
     print(f"[Sunday] User files: {USER_FILES_DIR}")
     print(f"[Sunday] Code folder: {CODE_DIR}")
+    print(f"[Sunday] API keys loaded: {len(API_KEYS)}")
     print("=" * 60)
 
     recognizer = sr.Recognizer()
@@ -1189,7 +1248,6 @@ if __name__ == "__main__":
 
     print("\n😴 SLEEP MODE — Say 'Wake up Sunday'")
     print("💻 Say 'Make a Python calculator' → auto-code!")
-    print("🔧 Say 'Fix the bug in test.py' → auto-fix!")
     print("👋 Say 'Bye Sunday' → sleep")
     print("🚪 Say 'Goodbye' → exit\n")
 
