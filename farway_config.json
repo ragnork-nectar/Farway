@@ -1,0 +1,18 @@
+{
+  "assistant_name": "Farway",
+  "ollama_model": "qwen2.5:1.5b",
+  "whisper_wake_model": "tiny.en",
+  "whisper_command_model": "base.en",
+  "tts_rate": 175,
+  "voice_id": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\TTS_MS_EN-US_ZIRA_11.0",
+  "wake_phrases": [
+    "hey farway",
+    "hi farway",
+    "ok farway",
+    "hello farway"
+  ],
+  "always_on": false,
+  "memory_limit": 50,
+  "screenshot_dir": "Farway_Screenshots",
+  "temp_wav": "farway_input.wav"
+}
