@@ -118,6 +118,8 @@ VOICE_PERMISSION_READY = threading.Event()
 PENDING_PERMISSION_LOCK = threading.Lock()
 PENDING_PERMISSION = None
 TERMINAL_CWD = ROOT_DIR
+RECENT_TTS_TEXT = ""
+RECENT_TTS_FINISHED_AT = 0.0
 
 
 def _permission_answer(text):
@@ -421,7 +423,7 @@ KNOWN_COMMAND_KEYWORDS = [
 ]
 
 SYSTEM_AUDIO_NOISE = [
-    "subscribe", "like and", "share", "comment", "click",
+    "subscribe", "like and", "share", "comment",
     "video", "channel", "notification", "bell", "button",
     "thanks for watching", "watch", "playlist", "next video",
     "intro", "outro", "sponsor", "like this video",
@@ -446,6 +448,33 @@ def is_system_noise(text):
         if noise in t:
             return True
     return False
+
+
+def _configure_voice_recognizer(recognizer):
+    recognizer.energy_threshold = 300
+    recognizer.dynamic_energy_threshold = True
+    recognizer.dynamic_energy_adjustment_damping = 0.15
+    recognizer.dynamic_energy_ratio = 1.5
+    recognizer.pause_threshold = 0.45
+    recognizer.phrase_threshold = 0.25
+    recognizer.non_speaking_duration = 0.3
+
+
+def _remember_tts_output(text):
+    global RECENT_TTS_TEXT, RECENT_TTS_FINISHED_AT
+    RECENT_TTS_TEXT = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    RECENT_TTS_FINISHED_AT = time.monotonic()
+
+
+def _is_recent_tts_echo(text):
+    if time.monotonic() - RECENT_TTS_FINISHED_AT > 4:
+        return False
+    heard = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    if len(heard) < 6 or not RECENT_TTS_TEXT:
+        return False
+    return heard == RECENT_TTS_TEXT or (
+        len(heard) >= 12 and (heard in RECENT_TTS_TEXT or RECENT_TTS_TEXT in heard)
+    )
 
 
 # ============================================================
@@ -523,6 +552,8 @@ def speak(text, allow_stop=False):
             speaker.Speak(text)
         except Exception as ex:
             print(f"[TTS Error] {ex}")
+        finally:
+            _remember_tts_output(str(text))
         if hud:
             try:
                 if HUNTER_MODE:
@@ -543,6 +574,7 @@ def speak(text, allow_stop=False):
         except Exception as ex:
             print(f"[TTS Error] {ex}")
         finally:
+            _remember_tts_output(str(text))
             speech_done.set()
 
     def _listener_thread():
@@ -1814,6 +1846,14 @@ def process_command(c, from_text=False):
     print(f"[You] {c}")
     words = c.split()
 
+    if not from_text:
+        if is_system_noise(c):
+            print(f"[Filter] Ignored likely system audio: '{c}'")
+            return
+        if not is_command_like(c):
+            print(f"[Filter] No command keyword — ignoring: '{c}'")
+            return
+
     terminal_result = handle_terminal_command(original)
     if terminal_result is not None:
         speak(terminal_result)
@@ -1846,14 +1886,6 @@ def process_command(c, from_text=False):
     screen_result = handle_screen_command(original, c)
     if screen_result is not None:
         speak(screen_result)
-        return
-
-    if not from_text and is_system_noise(c):
-        print(f"[Filter] Ignored system audio: '{c}'")
-        return
-
-    if not from_text and not is_command_like(c):
-        print(f"[Filter] No command keyword — ignoring: '{c}'")
         return
 
     if is_stop_command(c):
@@ -2255,17 +2287,13 @@ def main():
     print("=" * 60)
 
     recognizer = sr.Recognizer()
-    recognizer.energy_threshold = 4000
-    recognizer.dynamic_energy_threshold = False
-    recognizer.pause_threshold = 0.6
-    recognizer.phrase_threshold = 0.4
-    recognizer.non_speaking_duration = 0.4
+    _configure_voice_recognizer(recognizer)
 
     mic = sr.Microphone()
 
     with mic as source:
-        print("[Sunday] Calibrating mic (stay quiet 2s)...")
-        recognizer.adjust_for_ambient_noise(source, duration=2)
+        print("[Sunday] Calibrating mic (stay quiet 1s)...")
+        recognizer.adjust_for_ambient_noise(source, duration=1)
         print(f"[Sunday] Energy threshold: {recognizer.energy_threshold}")
 
     VOICE_PERMISSION_READY.set()
@@ -2310,6 +2338,9 @@ def main():
                 continue
 
             if not text:
+                continue
+            if _is_recent_tts_echo(text):
+                print("[Filter] Ignored Sunday speaker echo.")
                 continue
 
             if mode == "sleep":

@@ -124,6 +124,37 @@ class PermissionTests(unittest.TestCase):
 
         speak.assert_not_called()
 
+    def test_voice_system_audio_is_filtered_before_any_action(self):
+        with (
+            patch.object(sunday, "is_system_noise", return_value=True),
+            patch.object(sunday, "handle_screen_command") as screen_command,
+            patch.object(sunday, "speak") as speak,
+        ):
+            sunday.process_command("click", from_text=False)
+
+        screen_command.assert_not_called()
+        speak.assert_not_called()
+
+    def test_spoken_click_is_not_mistaken_for_system_audio(self):
+        self.assertFalse(sunday.is_system_noise("click"))
+
+    def test_voice_recognizer_uses_adaptive_threshold_and_shorter_pause(self):
+        recognizer = sunday.sr.Recognizer()
+        sunday._configure_voice_recognizer(recognizer)
+
+        self.assertTrue(recognizer.dynamic_energy_threshold)
+        self.assertEqual(recognizer.pause_threshold, 0.45)
+        self.assertEqual(recognizer.non_speaking_duration, 0.3)
+        self.assertEqual(recognizer.phrase_threshold, 0.25)
+
+    def test_recent_sunday_speech_is_filtered_as_speaker_echo(self):
+        with (
+            patch.object(sunday, "RECENT_TTS_TEXT", "opening youtube"),
+            patch.object(sunday, "RECENT_TTS_FINISHED_AT", sunday.time.monotonic()),
+        ):
+            self.assertTrue(sunday._is_recent_tts_echo("Opening YouTube"))
+            self.assertFalse(sunday._is_recent_tts_echo("open calculator"))
+
     def test_cursor_move_does_not_prompt_and_uses_coordinates(self):
         with (
             patch.object(sunday.pyautogui, "size", return_value=(1920, 1080)),
