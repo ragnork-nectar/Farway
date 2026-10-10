@@ -1,10 +1,9 @@
 """
-Sunday v35 — Full Assistant + Dual HUD + Legal-First Hunter Mode
+Sunday v39 — Full Assistant + Dual HUD + Hunter + Offline Personal Replies
 ========================================
-- 🎨 Small arc reactor (always-on)
-- 🖥️ Fullscreen Cosmos Orb (wake word pe)
-- ⌨️ Tab key → hide/show fullscreen HUD
-- 🎯 Hunter Mode — "Sunday Daspin" (legal terms + scope required)
+- 🎨 Small + Fullscreen HUD — RED in hunter mode
+- 🎯 Hunter Mode — legal-first, no AI fallback, auto-bot
+- 💬 Offline personal replies (thanks, name, owner) — no API call
 - 🛡️ Anti-echo filter
 - 🧠 Memory, code gen, volume, apps, files — all intact
 """
@@ -34,7 +33,6 @@ except ImportError:
 from memory_manager import Memory
 from hud_controller import init_hud
 
-# Hunter mode (legal-first)
 try:
     import sunday_hunter
     HUNTER_AVAILABLE = True
@@ -113,7 +111,7 @@ HUNTER_MODE = False
 
 
 # ============================================================
-# 3) WAKE / HUNTER / SLEEP / EXIT PHRASES
+# 3) PHRASES
 # ============================================================
 WAKE_PHRASES = [
     "wake up sunday", "hey sunday", "hi sunday", "hello sunday",
@@ -123,7 +121,7 @@ WAKE_PHRASES = [
 HUNTER_ACTIVATE_PHRASES = [
     "sunday hunter", "hunter mode on", "activate hunter",
     "sunday hunter mode", "hunter mode activate",
-    "hunter mode", "start hunter",
+    "hunter mode", "start hunter", "enter hunter",
 ]
 
 HUNTER_DEACTIVATE_PHRASES = [
@@ -131,6 +129,7 @@ HUNTER_DEACTIVATE_PHRASES = [
     "back to normal", "hunter band karo", "normal mode",
     "exit hunter", "stop hunter",
 ]
+
 
 def is_wake(text):
     t = text.lower().strip()
@@ -189,7 +188,58 @@ def is_stop_command(text):
 
 
 # ============================================================
-# 4) ANTI-ECHO FILTER
+# 4) OFFLINE PERSONALITY RESPONSES
+# ============================================================
+OWNER_NAME = "Ragnork Nectar"
+ASSISTANT_NAME = "Sunday"
+
+PERSONAL_REPLIES = {
+    # Thanks
+    "thanks":          f"You're welcome, {OWNER_NAME.split()[0]}!",
+    "thank you":       f"You're welcome, {OWNER_NAME.split()[0]}!",
+    "thank u":         f"Anytime, {OWNER_NAME.split()[0]}!",
+    "shukriya":        f"Anytime, {OWNER_NAME.split()[0]}!",
+    "dhanyavad":       f"Koi baat nahi, {OWNER_NAME.split()[0]}!",
+    "dhanyavaad":      f"Koi baat nahi, {OWNER_NAME.split()[0]}!",
+
+    # Name
+    "what is your name":       f"I'm {ASSISTANT_NAME}, your AI assistant.",
+    "what's your name":        f"I'm {ASSISTANT_NAME}, your AI assistant.",
+    "who are you":             f"I'm {ASSISTANT_NAME}, your offline AI assistant.",
+    "tumhara naam kya":        f"Mera naam {ASSISTANT_NAME} hai.",
+    "tumhara naam":            f"Mera naam {ASSISTANT_NAME} hai.",
+    "aapka naam kya":          f"Mera naam {ASSISTANT_NAME} hai.",
+
+    # Owner
+    "who is your owner":       f"I was created by {OWNER_NAME}.",
+    "who's your owner":        f"I was created by {OWNER_NAME}.",
+    "who made you":            f"I was made by {OWNER_NAME}.",
+    "who created you":         f"I was created by {OWNER_NAME}.",
+    "tumhe kisne banaya":      f"Mujhe {OWNER_NAME} ne banaya hai.",
+    "tumhe kisne bnaya":       f"Mujhe {OWNER_NAME} ne banaya hai.",
+    "tera owner kaun":         f"Mera owner {OWNER_NAME} hai.",
+    "tumhara owner kaun":      f"Mera owner {OWNER_NAME} hai.",
+}
+
+
+def get_personal_reply(text):
+    """Check if text matches a personal phrase. Returns reply or None."""
+    t = text.lower().strip().rstrip(".!?, ")
+
+    # Exact match first
+    if t in PERSONAL_REPLIES:
+        return PERSONAL_REPLIES[t]
+
+    # Substring match for longer phrases
+    for phrase, reply in PERSONAL_REPLIES.items():
+        if phrase in t:
+            return reply
+
+    return None
+
+
+# ============================================================
+# 5) ANTI-ECHO FILTER
 # ============================================================
 KNOWN_COMMAND_KEYWORDS = [
     # System
@@ -213,12 +263,20 @@ KNOWN_COMMAND_KEYWORDS = [
     "bye", "goodbye", "good bye", "sleep",
     # Stop
     "stop", "chup", "ruk",
-    # Hunter
-    "hunter", "scope", "dns", "port scan", "subdomain",
-    "http header", "robots", "ssl", "whois", "tech detect",
+    # Hunter + scope (STT variants)
+    "add to", "add the", "add scope", "add to scope", "add to score",
+    "hunter", "scope", "remove from scope", "show scope",
+    "dns", "port scan", "subdomain", "http header", "http method",
+    "robots", "ssl", "whois", "who is", "tech detect", "wayback", "way back",
     "save finding", "show findings", "clear findings",
     "accept terms", "legal terms", "audit log",
-    "remove from scope", "remove scope",
+    "payload", "report",
+    # Auto-bot
+    "bot ", "bot status", "stop bot", "auto bot", "autobot",
+    # Personal (offline replies)
+    "thanks", "thank you", "thank u", "shukriya", "dhanyavad", "dhanyavaad",
+    "your name", "who are you", "your owner", "made you", "created you",
+    "tumhara naam", "tumhe kisne", "tera owner", "tumhara owner",
 ]
 
 SYSTEM_AUDIO_NOISE = [
@@ -250,7 +308,7 @@ def is_system_noise(text):
 
 
 # ============================================================
-# 5) APP LIBRARY
+# 6) APP LIBRARY
 # ============================================================
 APPS = {
     "chrome": "chrome", "google chrome": "chrome",
@@ -277,7 +335,7 @@ APPS = {
 
 
 # ============================================================
-# 6) VOICE
+# 7) VOICE
 # ============================================================
 def init_speaker():
     global speaker
@@ -326,7 +384,10 @@ def speak(text, allow_stop=False):
             print(f"[TTS Error] {ex}")
         if hud:
             try:
-                hud.set_state("idle")
+                if HUNTER_MODE:
+                    hud.set_state("hunter")
+                else:
+                    hud.set_state("idle")
                 hud.set_text("")
             except Exception:
                 pass
@@ -375,14 +436,17 @@ def speak(text, allow_stop=False):
     speech_done.set()
     if hud:
         try:
-            hud.set_state("idle")
+            if HUNTER_MODE:
+                hud.set_state("hunter")
+            else:
+                hud.set_state("idle")
             hud.set_text("")
         except Exception:
             pass
 
 
 # ============================================================
-# 7) KEYBOARD LISTENER
+# 8) KEYBOARD LISTENER
 # ============================================================
 def start_keyboard_listener():
     global hud_hidden
@@ -427,7 +491,7 @@ def start_keyboard_listener():
 
 
 # ============================================================
-# 8) VOLUME
+# 9) VOLUME
 # ============================================================
 def get_volume_interface():
     if not VOLUME_AVAILABLE:
@@ -492,7 +556,7 @@ def volume_mute():
 
 
 # ============================================================
-# 9) APP CONTROL
+# 10) APP CONTROL
 # ============================================================
 def open_app_smart(app_name):
     key = app_name.lower().strip()
@@ -542,7 +606,7 @@ def close_app(app_name):
 
 
 # ============================================================
-# 10) MEDIA
+# 11) MEDIA
 # ============================================================
 def media_play_pause():
     pyautogui.press("playpause")
@@ -565,7 +629,7 @@ def media_stop():
 
 
 # ============================================================
-# 11) SYSTEM
+# 12) SYSTEM
 # ============================================================
 def system_lock():
     import ctypes
@@ -611,7 +675,7 @@ def system_screenshot():
 
 
 # ============================================================
-# 12) MUSIC
+# 13) MUSIC
 # ============================================================
 def play_song(song_name):
     if hud:
@@ -631,7 +695,7 @@ def play_song(song_name):
 
 
 # ============================================================
-# 13) FILE MANAGER
+# 14) FILE MANAGER
 # ============================================================
 def _resolve_user_path(filename, code=False):
     filename = filename.strip().strip('"').strip("'")
@@ -758,7 +822,7 @@ def open_code_folder():
 
 
 # ============================================================
-# 14) MEMORY AUTO-DETECTION
+# 15) MEMORY AUTO-DETECTION
 # ============================================================
 def detect_and_save_memory(text):
     if memory is None:
@@ -816,7 +880,7 @@ def detect_and_save_memory(text):
 
 
 # ============================================================
-# 15) MULTI-KEY GEMINI
+# 16) MULTI-KEY GEMINI
 # ============================================================
 CODE_GEN_SYSTEM = (
     "You are an expert programmer. The user wants you to write code. "
@@ -914,7 +978,10 @@ def _call_gemini(prompt, max_attempts_per_key=2):
                         print(f"[AI] ✅ Success with key #{key_index + 1}, {len(text)} chars")
                         if hud:
                             try:
-                                hud.set_state("idle")
+                                if HUNTER_MODE:
+                                    hud.set_state("hunter")
+                                else:
+                                    hud.set_state("idle")
                                 hud.set_text("")
                             except Exception:
                                 pass
@@ -942,7 +1009,10 @@ def _call_gemini(prompt, max_attempts_per_key=2):
     print("[AI] ❌ All API keys exhausted")
     if hud:
         try:
-            hud.set_state("idle")
+            if HUNTER_MODE:
+                hud.set_state("hunter")
+            else:
+                hud.set_state("idle")
             hud.set_text("")
         except Exception:
             pass
@@ -950,7 +1020,7 @@ def _call_gemini(prompt, max_attempts_per_key=2):
 
 
 # ============================================================
-# 16) CODE GENERATION
+# 17) CODE GENERATION
 # ============================================================
 def ai_generate_code(description):
     print(f"\n[CodeGen] Generating code for: {description}")
@@ -1022,7 +1092,7 @@ def detect_filename(description):
 
 
 # ============================================================
-# 17) INTENT DETECTION
+# 18) INTENT DETECTION
 # ============================================================
 CODE_CREATE_TRIGGERS = [
     "make a", "make me", "create a", "create me", "write a", "write me",
@@ -1077,7 +1147,7 @@ def is_code_run_request(text):
 
 
 # ============================================================
-# 18) CODE WORKFLOWS
+# 19) CODE WORKFLOWS
 # ============================================================
 def workflow_generate_code(description):
     speak("Let me write that code for you")
@@ -1180,7 +1250,7 @@ def workflow_run_code(filename):
 
 
 # ============================================================
-# 19) HUNTER MODE HELPERS (Legal-First)
+# 20) HUNTER MODE HELPERS
 # ============================================================
 def enter_hunter_mode():
     global HUNTER_MODE
@@ -1188,41 +1258,54 @@ def enter_hunter_mode():
         return "Hunter module not available. Check sunday_hunter.py"
 
     HUNTER_MODE = True
+
     if hud:
         try:
-            hud.set_state("thinking")
-            hud.set_text("HUNTER MODE")
+            hud.enter_hunter()
         except Exception:
-            pass
+            try:
+                hud.set_palette("red")
+                hud.set_state("hunter")
+            except Exception:
+                pass
 
-    # Check legal terms acceptance
     try:
         if not sunday_hunter.terms_accepted():
             return (
-                "Hunter mode active — but LEGAL TERMS not accepted. "
-                "Say 'accept terms' to acknowledge: only test targets you own "
-                "or have written permission to test. Unauthorized scanning is illegal."
+                "Hunter mode active — HUD red. LEGAL TERMS not accepted. "
+                "Say 'accept terms' to acknowledge."
             )
     except Exception:
         pass
 
-    return "Hunter mode active. Stay legal — only test in-scope targets. Say 'hunter help' for commands."
+    return "Hunter mode active. HUD is red. Stay legal — only test in-scope targets."
 
 
 def exit_hunter_mode():
     global HUNTER_MODE
+
+    try:
+        if HUNTER_AVAILABLE:
+            sunday_hunter.stop_autobot()
+    except Exception:
+        pass
+
     HUNTER_MODE = False
+
     if hud:
         try:
-            hud.set_state("idle")
-            hud.set_text("")
+            hud.exit_hunter()
         except Exception:
-            pass
-    return "Normal mode active."
+            try:
+                hud.set_palette("amber")
+                hud.set_state("idle")
+            except Exception:
+                pass
+
+    return "Normal mode active. HUD back to amber."
 
 
-def handle_hunter_mode(text):
-    """Run hunter command. Returns (reply, handled)."""
+def handle_hunter_command(text):
     if not HUNTER_AVAILABLE:
         return "Hunter module not available", True
     try:
@@ -1233,7 +1316,7 @@ def handle_hunter_mode(text):
 
 
 # ============================================================
-# 20) COMMAND HANDLER
+# 21) COMMAND HANDLER
 # ============================================================
 def process_command(c):
     global HUNTER_MODE
@@ -1243,23 +1326,30 @@ def process_command(c):
     print(f"[You] {original}")
     words = c.split()
 
-    # ---- HUNTER mode: try hunter commands first ----
+    # ---- PERSONAL REPLIES (both modes, offline) ----
+    personal = get_personal_reply(c)
+    if personal:
+        print(f"[Personality] Matched: '{c}'")
+        speak(personal)
+        return
+
+    # ---- HUNTER MODE: strictly hunter commands only ----
     if HUNTER_MODE:
-        # Hunter deactivate
         if is_hunter_deactivate(c):
             reply = exit_hunter_mode()
             speak(reply)
             return
 
-        # Try hunter command
-        reply, handled = handle_hunter_mode(c)
+        reply, handled = handle_hunter_command(c)
         if handled:
             speak(reply)
             return
 
-        # Fall through to normal processing if not a hunter command
+        print(f"[Hunter] Not a hunter command: '{c}'")
+        speak("That's not a hunter command. Say 'hunter help' for the list.")
+        return
 
-    # Anti-echo filter
+    # ---- NORMAL MODE ----
     if is_system_noise(c):
         print(f"[Filter] Ignored system audio: '{c}'")
         return
@@ -1588,23 +1678,32 @@ def process_command(c):
 
 
 # ============================================================
-# 21) MAIN ENTRY
+# 22) MAIN ENTRY
 # ============================================================
 def main():
     global memory, hud, kb_listener, HUNTER_MODE
 
     print("\n" + "=" * 60)
-    print("  Sunday — v35 (Dual HUD + Legal-First Hunter)")
+    print("  Sunday — v39 (Personal Replies + PRO Hunter)")
     print("=" * 60)
 
     memory = Memory()
     init_speaker()
+
+    try:
+        if HUNTER_AVAILABLE:
+            sunday_hunter.set_speak_callback(speak)
+            print("[Sunday] Auto-bot speak callback wired")
+    except Exception as e:
+        print(f"[Sunday] Auto-bot wiring failed: {e}")
+
     hud = init_hud(enabled=True, fullscreen=True)
     kb_listener = start_keyboard_listener()
 
     speak("Sunday is ready. Say wake up Sunday to activate me.")
 
     print("=" * 60)
+    print(f"[Sunday] Owner: {OWNER_NAME}")
     print(f"[Sunday] API keys: {len(API_KEYS)}")
     print(f"[Sunday] HUD: {'enabled' if hud and hud.enabled else 'disabled'}")
     print(f"[Sunday] Hunter: {'available' if HUNTER_AVAILABLE else 'unavailable'}")
@@ -1629,7 +1728,8 @@ def main():
         print(f"[Sunday] Energy threshold: {recognizer.energy_threshold}")
 
     print("\n😴 SLEEP MODE — Say 'Wake up Sunday'")
-    print("🎯 Say 'Sunday Daspin' → Hunter Mode (legal-first)")
+    print("💬 Say 'Thanks' / 'Who is your owner' → offline reply")
+    print("🎯 Say 'Sunday hunter' → PRO Hunter Mode (RED HUD)")
     print("⌨️  Tab → hide/show HUD")
     print("👋 Say 'Bye Sunday' → sleep")
     print("🚪 Say 'Goodbye' → exit\n")
@@ -1649,7 +1749,10 @@ def main():
                 else:
                     if hud:
                         try:
-                            hud.set_state("listening")
+                            if HUNTER_MODE:
+                                hud.set_state("hunter")
+                            else:
+                                hud.set_state("listening")
                         except Exception:
                             pass
                     audio = recognizer.listen(source, timeout=6, phrase_time_limit=8)
@@ -1714,11 +1817,10 @@ def main():
                     print("\n😴 SLEEP MODE\n")
                     continue
 
-                # HUNTER MODE ACTIVATION
-                if is_hunter_activate(text):
+                if not HUNTER_MODE and is_hunter_activate(text):
                     reply = enter_hunter_mode()
                     speak(reply)
-                    print("\n🎯 HUNTER MODE ACTIVE\n")
+                    print("\n🎯 HUNTER MODE ACTIVE (RED)\n")
                     continue
 
                 process_command(text)
@@ -1738,6 +1840,12 @@ def main():
             continue
 
     print("\n🚪 Sunday stopped.\n")
+
+    try:
+        if HUNTER_AVAILABLE:
+            sunday_hunter.stop_autobot()
+    except Exception:
+        pass
 
     try:
         if kb_listener:

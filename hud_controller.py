@@ -1,6 +1,6 @@
 """
-HUD Controller — Manages BOTH small (Tkinter) + fullscreen (Web/Cosmos Orb) HUDs.
-Both run in separate processes. Files are in the project root.
+HUD Controller — Manages small (Tkinter) + fullscreen (Web) HUDs.
+Supports hunter mode (red palette).
 """
 
 import sys
@@ -16,7 +16,7 @@ ROOT_DIR = Path(__file__).parent.resolve()
 
 
 # ============================================================
-# SMALL HUD PROCESS (Tkinter arc reactor, bottom-right)
+# SMALL HUD PROCESS
 # ============================================================
 def _small_hud_process():
     try:
@@ -31,7 +31,7 @@ def _small_hud_process():
 
 
 # ============================================================
-# FULLSCREEN HUD PROCESS (Web / Cosmos Orb)
+# FULLSCREEN HUD PROCESS
 # ============================================================
 def _fullscreen_hud_process():
     try:
@@ -122,7 +122,11 @@ class HUDController:
         if not self.enabled:
             return
         self._write(self.state_file, state)
+
+        # Map to fullscreen HUD states (only idle/listening/speaking)
         if state == "thinking":
+            self._write(self.full_state_file, "listening")
+        elif state == "hunter":
             self._write(self.full_state_file, "listening")
         else:
             self._write(self.full_state_file, state)
@@ -157,9 +161,26 @@ class HUDController:
     def set_palette(self, palette):
         if not self.enabled:
             return
-        if palette not in ("amber", "cyan", "violet"):
+        if palette not in ("amber", "cyan", "violet", "red"):
             return
         self._write(self.palette_file, palette)
+
+    # ---------- HUNTER MODE ----------
+    def enter_hunter(self):
+        """Switch HUD to hunter mode (red palette + hunter state)."""
+        if not self.enabled:
+            return
+        self._write(self.state_file, "hunter")
+        self._write(self.full_state_file, "listening")
+        self._write(self.palette_file, "red")
+
+    def exit_hunter(self):
+        """Switch HUD back to normal mode (amber palette)."""
+        if not self.enabled:
+            return
+        self._write(self.palette_file, "amber")
+        self._write(self.state_file, "idle")
+        self._write(self.full_state_file, "idle")
 
     # ---------- VISIBILITY ----------
     def show_fullscreen(self):

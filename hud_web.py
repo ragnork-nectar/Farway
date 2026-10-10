@@ -1,7 +1,8 @@
 """
 Sunday Web HUD — Cosmos Orb HTML + state API.
 Flask server + pywebview fullscreen window.
-Files are in the project root. Starts hidden; shows on wake word only.
+Supports palettes: amber, cyan, violet, red (hunter mode).
+Starts hidden; shows on wake word only.
 """
 
 import threading
@@ -15,7 +16,7 @@ try:
 except ImportError:
     PSUTIL_OK = False
 
-# Root is the project folder (where this file lives)
+# Root is the project folder
 ROOT_DIR = Path(__file__).parent.resolve()
 TEMP_DIR = ROOT_DIR / "temp"
 TEMP_DIR.mkdir(exist_ok=True)
@@ -25,6 +26,9 @@ TEXT_FILE = TEMP_DIR / "hud_fullscreen_text.txt"
 PALETTE_FILE = TEMP_DIR / "hud_palette.txt"
 LEVEL_FILE = TEMP_DIR / "hud_level.txt"
 VISIBLE_FILE = TEMP_DIR / "hud_visible.txt"
+
+# Valid palettes
+VALID_PALETTES = ("amber", "cyan", "violet", "red")
 
 app = Flask(__name__, static_folder=str(ROOT_DIR))
 
@@ -46,16 +50,19 @@ def get_state():
             s = STATE_FILE.read_text(encoding="utf-8").strip()
             if s in ("idle", "listening", "speaking"):
                 state = s
+
         if PALETTE_FILE.exists():
             p = PALETTE_FILE.read_text(encoding="utf-8").strip()
-            if p in ("amber", "cyan", "violet"):
+            if p in VALID_PALETTES:
                 palette = p
+
         if LEVEL_FILE.exists():
             try:
                 level = float(LEVEL_FILE.read_text(encoding="utf-8").strip())
                 level = max(0.0, min(1.0, level))
             except Exception:
                 level = None
+
         if TEXT_FILE.exists():
             text = TEXT_FILE.read_text(encoding="utf-8").strip()[:200]
     except Exception:
@@ -87,14 +94,20 @@ def run_server():
     import logging
     log = logging.getLogger("werkzeug")
     log.setLevel(logging.ERROR)
-    app.run(host="127.0.0.1", port=5050, debug=False, use_reloader=False, threaded=True)
+    app.run(
+        host="127.0.0.1",
+        port=5050,
+        debug=False,
+        use_reloader=False,
+        threaded=True,
+    )
 
 
 def run_hud_window():
-    """Open pywebview window. Start small + offscreen, then go fullscreen only when told."""
+    """Open pywebview window. Start small + offscreen, go fullscreen when told."""
     import webview
 
-    # Give Flask a moment to start
+    # Wait for Flask to boot
     time.sleep(1.5)
 
     window = None

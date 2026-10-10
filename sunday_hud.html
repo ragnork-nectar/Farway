@@ -34,7 +34,6 @@ body {
 .meter { height: 3px; background: var(--edge); position: relative; }
 .meter i { position: absolute; inset: 0 auto 0 0; width: 0%; background: var(--accent); box-shadow: 0 0 10px var(--accent); }
 
-/* Corner info panels */
 .panel {
   position: absolute;
   font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase;
@@ -60,7 +59,6 @@ body {
 .panel.bottom-left { bottom: 16px; left: 16px; }
 .panel.bottom-right { bottom: 16px; right: 16px; }
 
-/* Spoken text overlay */
 .spoken-text {
   position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%);
   max-width: 70%; padding: 12px 24px;
@@ -83,7 +81,6 @@ body {
 
 <div id="stage" aria-label="Sunday AI Core"></div>
 
-<!-- Top-left: System state -->
 <div class="readout">
   <div>SUNDAY OS <b>v1.0</b></div>
   <div>STATE <b id="rdState">Idle</b></div>
@@ -91,30 +88,25 @@ body {
   <div>LEVEL <b id="rdLevel">0</b>%</div>
 </div>
 
-<!-- Top-right: Time / Date -->
 <div class="panel top-right">
   <div class="title">TIME / DATE</div>
   <div class="row"><span>TIME</span><b id="rdTime">--:--</b></div>
   <div class="row"><span>DATE</span><b id="rdDate">--</b></div>
 </div>
 
-<!-- Bottom-left: System stats -->
 <div class="panel bottom-left">
   <div class="title">SYSTEM STATS</div>
   <div class="row"><span>CPU</span><b id="rdCpu">0%</b></div>
   <div class="row"><span>RAM</span><b id="rdRam">0%</b></div>
 </div>
 
-<!-- Bottom-right: Now Playing -->
 <div class="panel bottom-right">
   <div class="title">NOW PLAYING</div>
   <div class="row"><span id="rdPlaying">Nothing</span></div>
 </div>
 
-<!-- Spoken text -->
 <div class="spoken-text" id="spokenText"></div>
 
-<!-- Bottom hint -->
 <div class="hint-bar">SUNDAY — DRAG TO ROTATE • F12 TO HIDE</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -122,7 +114,6 @@ body {
 (function () {
   'use strict';
 
-  /* ---------- setup ---------- */
   var stage = document.getElementById('stage');
   var renderer = new THREE.WebGLRenderer({ antialias: true });
   var PR = Math.min(window.devicePixelRatio || 1, 2);
@@ -147,11 +138,12 @@ body {
     return [s * Math.cos(th), u, s * Math.sin(th)];
   }
 
-  /* ---------- palettes ---------- */
+  // PALETTES — amber, cyan, violet, RED for hunter
   var PALETTES = {
     amber:  { core: [1.0, 0.96, 0.82], hot: [1.0, 0.62, 0.14], cool: [0.85, 0.22, 0.03] },
     cyan:   { core: [0.86, 1.0, 1.0],  hot: [0.15, 0.80, 1.0],  cool: [0.04, 0.28, 0.92] },
-    violet: { core: [1.0, 0.92, 1.0],  hot: [0.78, 0.40, 1.0],  cool: [0.33, 0.08, 0.80] }
+    violet: { core: [1.0, 0.92, 1.0],  hot: [0.78, 0.40, 1.0],  cool: [0.33, 0.08, 0.80] },
+    red:    { core: [1.0, 0.85, 0.85], hot: [1.0, 0.15, 0.15],  cool: [0.60, 0.02, 0.02] }
   };
 
   var uniforms = {
@@ -162,7 +154,6 @@ body {
     uCool:  { value: new THREE.Color() }
   };
 
-  /* ---------- soft point shader ---------- */
   var pointMat = new THREE.ShaderMaterial({
     uniforms: uniforms,
     transparent: true,
@@ -205,7 +196,6 @@ body {
     return p;
   }
 
-  /* ---------- core glow ---------- */
   function glowTexture() {
     var c = document.createElement('canvas');
     c.width = c.height = 256;
@@ -229,7 +219,6 @@ body {
   var flare = makeSprite(0.5);
   scene.add(halo, flare, core);
 
-  /* ---------- orbital particle rings ---------- */
   var rings = [];
   (function buildRings() {
     var RING_COUNT = 18, N = 520;
@@ -258,7 +247,6 @@ body {
     }
   })();
 
-  /* ---------- outer streak shell ---------- */
   var streaks;
   (function buildStreaks() {
     var N = 1500;
@@ -283,7 +271,6 @@ body {
     root.add(streaks.mesh);
   })();
 
-  /* ---------- radial rays ---------- */
   var RAY_N = 58, RAY_PTS = 34;
   var rays = { dir: [], base: [], phase: [], speed: [] };
   var rayLine, rayPoints, rayLinePos, rayPtPos, rayLineCol;
@@ -316,7 +303,6 @@ body {
     root.add(rayLine, rayPoints);
   })();
 
-  /* ---------- palette application ---------- */
   function applyPalette(name) {
     var p = PALETTES[name]; if (!p) return;
     uniforms.uHot.value.setRGB(p.hot[0], p.hot[1], p.hot[2]);
@@ -342,7 +328,6 @@ body {
   }
   applyPalette('amber');
 
-  /* ---------- state / level ---------- */
   var state = 'idle';
   var level = 0, targetLevel = 0, externalLevel = null;
   var speakNoise = 0, speakNext = 0;
@@ -355,7 +340,6 @@ body {
     return speakNoise;
   }
 
-  /* ---------- interaction ---------- */
   var rotX = 0.25, rotY = 0, velX = 0, velY = 0, dragging = false, lastX = 0, lastY = 0;
   stage.addEventListener('pointerdown', function (e) {
     dragging = true; lastX = e.clientX; lastY = e.clientY;
@@ -372,7 +356,6 @@ body {
   stage.addEventListener('pointerup', endDrag);
   stage.addEventListener('pointercancel', endDrag);
 
-  /* ---------- resize ---------- */
   function resize() {
     var w = window.innerWidth, h = window.innerHeight;
     renderer.setSize(w, h, false);
@@ -383,7 +366,6 @@ body {
   window.addEventListener('resize', resize);
   resize();
 
-  /* ---------- UI wiring ---------- */
   var rdState = document.getElementById('rdState');
   var rdMeter = document.getElementById('rdMeter');
   var rdLevel = document.getElementById('rdLevel');
@@ -405,10 +387,10 @@ body {
     setPalette: applyPalette
   };
 
-  /* ---------- SUNDAY INTEGRATION ---------- */
   var spokenTextEl = document.getElementById('spokenText');
   var lastState = 'idle';
   var lastText = '';
+  var lastPalette = 'amber';
 
   function pollSunday() {
     fetch('/state')
@@ -418,8 +400,9 @@ body {
           lastState = data.state;
           if (window.orb && window.orb.setState) window.orb.setState(data.state);
         }
-        if (data.palette && window.orb && window.orb.setPalette) {
-          window.orb.setPalette(data.palette);
+        if (data.palette && data.palette !== lastPalette) {
+          lastPalette = data.palette;
+          if (window.orb && window.orb.setPalette) window.orb.setPalette(data.palette);
         }
         if (data.level !== undefined && data.level !== null && window.orb && window.orb.setLevel) {
           window.orb.setLevel(data.level);
@@ -435,7 +418,6 @@ body {
             }
           }
         }
-        // System stats
         if (data.cpu !== undefined && rdCpu) rdCpu.textContent = data.cpu + '%';
         if (data.ram !== undefined && rdRam) rdRam.textContent = data.ram + '%';
       })
@@ -444,7 +426,6 @@ body {
     setTimeout(pollSunday, 500);
   }
 
-  // Local time/date updater
   function updateClock() {
     var now = new Date();
     var hh = String(now.getHours()).padStart(2, '0');
@@ -460,12 +441,10 @@ body {
 
   setTimeout(pollSunday, 300);
 
-  /* F12 to close (for test) */
   document.addEventListener('keydown', function (e) {
     if (e.key === 'F12') { try { window.close(); } catch (err) {} }
   });
 
-  /* ---------- animation loop ---------- */
   var clock = new THREE.Clock(), T = 0, lastReadout = 0;
 
   function frame() {

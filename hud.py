@@ -1,13 +1,11 @@
 """
-Sunday HUD v2 — Arc Reactor Overlay
-Runs in its own process to avoid Tkinter threading issues.
-Reads state from temp/hud_state.txt.
+Sunday HUD — Small arc reactor (bottom-right corner).
+Supports 5 states: idle, listening, thinking, speaking, hunter.
 """
 
 import tkinter as tk
 import math
 import time
-import os
 from pathlib import Path
 
 
@@ -26,7 +24,7 @@ class SundayHUD:
         self.root.configure(bg="black")
         self.root.attributes("-alpha", 0.95)
 
-        # Position on screen
+        # Position
         self.root.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -63,21 +61,22 @@ class SundayHUD:
         self.pulse = 0
         self.mic_level = 0.3
 
+        # Colors — 5 states
         self.colors = {
-            "idle":      "#ff8c00",
-            "listening": "#ffa500",
-            "thinking":  "#ff6600",
-            "speaking":  "#ffcc00",
+            "idle":      "#ff8c00",   # deep orange
+            "listening": "#ffa500",   # bright orange
+            "thinking":  "#ff6600",   # red-orange
+            "speaking":  "#ffcc00",   # golden yellow
+            "hunter":    "#ff2222",   # RED for hunter mode
         }
 
-        # State file path (for IPC)
+        # State file path
         self.state_file = Path(__file__).parent / "temp" / "hud_state.txt"
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Start animation
         self.root.after(40, self._animate)
 
-    # ---------- PUBLIC API ----------
+    # ---------- PUBLIC ----------
     def set_state(self, state):
         if state in self.colors:
             self.state = state
@@ -93,7 +92,6 @@ class SundayHUD:
             pass
 
     def run(self):
-        """Blocking mainloop — call from main thread of its own process."""
         try:
             self.root.mainloop()
         except KeyboardInterrupt:
@@ -115,7 +113,7 @@ class SundayHUD:
             outline="#3a1a00", width=2,
         )
 
-        # Outer rotating rays (24 rays)
+        # Outer rays
         num_rays = 24
         ray_len_outer = self.size * 0.46
         ray_len_inner = self.size * 0.34
@@ -126,15 +124,13 @@ class SundayHUD:
             y1 = cy + ray_len_inner * math.sin(angle_rad)
             x2 = cx + ray_len_outer * math.cos(angle_rad)
             y2 = cy + ray_len_outer * math.sin(angle_rad)
-
             w = 3 if i % 2 == 0 else 1
             self.canvas.create_line(x1, y1, x2, y2, fill=color, width=w)
 
-        # Inner rotating rays (12 rays, opposite direction)
+        # Inner rays (reverse)
         num_inner = 12
         ray_len_outer_in = self.size * 0.30
         ray_len_inner_in = self.size * 0.22
-
         for i in range(num_inner):
             angle_rad = math.radians((-self.angle * 1.5 + i * (360 / num_inner)))
             x1 = cx + ray_len_inner_in * math.cos(angle_rad)
@@ -160,10 +156,13 @@ class SundayHUD:
         # Glowing core (pulsing)
         core_r = self.size * 0.09 + self.pulse * self.size * 0.02
 
-        # Outer glow (layered)
+        # Glow layers
         for i in range(4, 0, -1):
             glow_r = core_r + i * 3
             fade = ["#ffe680", "#ffcc00", "#ffa500", "#ff8c00"][min(i - 1, 3)]
+            # Hunter mode: red glow
+            if self.state == "hunter":
+                fade = ["#ffaaaa", "#ff6666", "#ff3333", "#ff0000"][min(i - 1, 3)]
             self.canvas.create_oval(
                 cx - glow_r, cy - glow_r, cx + glow_r, cy + glow_r,
                 fill=fade, outline="",
@@ -182,7 +181,6 @@ class SundayHUD:
                 cx - pulse_r, cy - pulse_r, cx + pulse_r, cy + pulse_r,
                 outline=color, width=2,
             )
-
         elif self.state == "thinking":
             for i in range(6):
                 dot_angle = math.radians(self.angle * 3 + i * 60)
@@ -193,7 +191,6 @@ class SundayHUD:
                     dx - 3, dy - 3, dx + 3, dy + 3,
                     fill=color, outline="",
                 )
-
         elif self.state == "speaking":
             for i in range(3):
                 wave_r = self.size * 0.44 + i * 8 + self.pulse * 4
@@ -202,13 +199,29 @@ class SundayHUD:
                         cx - wave_r, cy - wave_r, cx + wave_r, cy + wave_r,
                         outline=color, width=1,
                     )
+        elif self.state == "hunter":
+            # Hunter: fast rotating markers + crosshair effect
+            for i in range(8):
+                dot_angle = math.radians(self.angle * 4 + i * 45)
+                dot_r = self.size * 0.44
+                dx = cx + dot_r * math.cos(dot_angle)
+                dy = cy + dot_r * math.sin(dot_angle)
+                self.canvas.create_oval(
+                    dx - 4, dy - 4, dx + 4, dy + 4,
+                    fill=color, outline="",
+                )
+            # Crosshair lines
+            ch_r = self.size * 0.48
+            self.canvas.create_line(cx - ch_r, cy, cx - self.size * 0.30, cy, fill=color, width=2)
+            self.canvas.create_line(cx + self.size * 0.30, cy, cx + ch_r, cy, fill=color, width=2)
+            self.canvas.create_line(cx, cy - ch_r, cx, cy - self.size * 0.30, fill=color, width=2)
+            self.canvas.create_line(cx, cy + self.size * 0.30, cx, cy + ch_r, fill=color, width=2)
 
     # ---------- ANIMATION LOOP ----------
     def _read_state(self):
-        """Read state from file (IPC)."""
         try:
             if self.state_file.exists():
-                content = self.state_file.read_text().strip()
+                content = self.state_file.read_text(encoding="utf-8").strip()
                 if content and content in self.colors and content != self.state:
                     self.state = content
         except Exception:
@@ -218,15 +231,15 @@ class SundayHUD:
         if not self.running:
             return
 
-        # Read latest state
         self._read_state()
 
-        # Rotation speed
+        # Rotation speed per state
         speed_map = {
             "idle": 0.4,
             "listening": 1.5,
             "thinking": 4.0,
             "speaking": 2.5,
+            "hunter": 5.0,   # fast
         }
         speed = speed_map.get(self.state, 0.4)
         self.angle = (self.angle + speed) % 360
@@ -239,6 +252,8 @@ class SundayHUD:
             self.pulse = 0.4 + self.mic_level * 0.6
         elif self.state == "thinking":
             self.pulse = 0.6 + 0.4 * math.sin(now * 4)
+        elif self.state == "hunter":
+            self.pulse = 0.8 + 0.2 * math.sin(now * 8)
         else:  # speaking
             self.pulse = 0.7 + 0.3 * math.sin(now * 6)
 
@@ -248,9 +263,7 @@ class SundayHUD:
 
 # ---------- STANDALONE TEST ----------
 if __name__ == "__main__":
-    print("[HUD] Starting standalone test...")
-    print("[HUD] Cycle: idle → listening → thinking → speaking")
-    print("[HUD] Close window to stop.\n")
-
-    hud = SundayHUD(size=220, position="bottom-right")
+    print("[HUD] Small arc reactor test")
+    print("[HUD] States: idle, listening, thinking, speaking, hunter")
+    hud = SundayHUD()
     hud.run()
