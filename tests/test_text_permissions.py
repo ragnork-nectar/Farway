@@ -138,6 +138,55 @@ class PermissionTests(unittest.TestCase):
 
         speak.assert_not_called()
 
+    def test_text_commands_are_ignored_in_sleep_mode_until_wake_phrase(self):
+        sunday.TEXT_COMMAND_QUEUE.put("open calculator")
+        with patch.object(sunday, "process_command") as process:
+            mode = sunday._process_pending_text_commands("sleep")
+
+        self.assertEqual(mode, "sleep")
+        process.assert_not_called()
+
+    def test_text_wake_phrase_enters_normal_command_mode(self):
+        sunday.TEXT_COMMAND_QUEUE.put("Wake up Sunday")
+        with (
+            patch.object(sunday, "_wake_from_sleep") as wake,
+            patch.object(sunday, "process_command") as process,
+        ):
+            mode = sunday._process_pending_text_commands("sleep")
+
+        self.assertEqual(mode, "command")
+        wake.assert_called_once()
+        process.assert_not_called()
+
+    def test_hunter_mode_does_not_route_open_or_questions_to_general_handlers(self):
+        with (
+            patch.object(sunday, "HUNTER_MODE", True),
+            patch.object(sunday, "handle_hunter_command", return_value=("not handled", False)),
+            patch.object(sunday, "handle_terminal_command") as terminal,
+            patch.object(sunday, "get_personal_reply") as personal_reply,
+            patch.object(sunday, "_call_gemini") as call_gemini,
+            patch.object(sunday, "speak") as speak,
+        ):
+            sunday.process_command("open chrome", from_text=True)
+
+        terminal.assert_not_called()
+        personal_reply.assert_not_called()
+        call_gemini.assert_not_called()
+        self.assertIn("Hunter mode", speak.call_args.args[0])
+
+    def test_hunter_mode_deactivation_is_handled_without_general_routing(self):
+        with (
+            patch.object(sunday, "HUNTER_MODE", True),
+            patch.object(sunday, "is_hunter_deactivate", return_value=True),
+            patch.object(sunday, "exit_hunter_mode", return_value="Normal mode active"),
+            patch.object(sunday, "handle_terminal_command") as terminal,
+            patch.object(sunday, "speak") as speak,
+        ):
+            sunday.process_command("sunday normal", from_text=True)
+
+        terminal.assert_not_called()
+        speak.assert_called_once_with("Normal mode active")
+
     def test_common_english_and_hinglish_questions_are_recognized(self):
         for utterance in ("What is Python?", "Why does it rain?", "Kaise kaam karta hai?"):
             with self.subTest(utterance=utterance):

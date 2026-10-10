@@ -1848,6 +1848,22 @@ def handle_terminal_command(raw_text):
     return None
 
 
+def _wake_from_sleep():
+    global hud_hidden
+    if hud:
+        try:
+            hud.show_fullscreen()
+        except Exception:
+            pass
+    hud_hidden = False
+    name = memory.get_profile("name") if memory else None
+    if name:
+        speak(f"Yes {name.split()[0]}, I'm listening")
+    else:
+        speak("Yes, I'm listening")
+    print("\n🎧 COMMAND MODE\n")
+
+
 # ============================================================
 # 21) COMMAND HANDLER
 # ============================================================
@@ -1867,6 +1883,24 @@ def process_command(c, from_text=False):
             print(f"[Filter] No command keyword — ignoring: '{c}'")
             return
 
+    # Hunter mode is isolated: never route its input to desktop tools or cloud AI.
+    if HUNTER_MODE:
+        if is_hunter_deactivate(c):
+            speak(exit_hunter_mode())
+            return
+
+        reply, handled = handle_hunter_command(c)
+        if handled:
+            speak(reply)
+        else:
+            print(f"[Hunter] Not a hunter command: '{c}'")
+            speak("Hunter mode mein sirf Hunter commands available hain. 'Hunter help' boliye.")
+        return
+
+    if is_hunter_activate(c):
+        speak(enter_hunter_mode())
+        return
+
     terminal_result = handle_terminal_command(original)
     if terminal_result is not None:
         speak(terminal_result)
@@ -1877,22 +1911,6 @@ def process_command(c, from_text=False):
     if personal:
         print(f"[Personality] Matched: '{c}'")
         speak(personal)
-        return
-
-    # ---- HUNTER MODE: strictly hunter commands only ----
-    if HUNTER_MODE:
-        if is_hunter_deactivate(c):
-            reply = exit_hunter_mode()
-            speak(reply)
-            return
-
-        reply, handled = handle_hunter_command(c)
-        if handled:
-            speak(reply)
-            return
-
-        print(f"[Hunter] Not a hunter command: '{c}'")
-        speak("That's not a hunter command. Say 'hunter help' for the list.")
         return
 
     # ---- NORMAL MODE ----
@@ -2251,14 +2269,21 @@ def start_terminal_input():
     TERMINAL_INPUT_READY.wait(timeout=1)
 
 
-def _process_pending_text_commands():
+def _process_pending_text_commands(mode):
     while True:
         try:
             command = TEXT_COMMAND_QUEUE.get_nowait()
         except queue.Empty:
-            return
+            return mode
         try:
-            process_command(command, from_text=True)
+            if mode == "sleep":
+                if is_wake(command):
+                    mode = "command"
+                    _wake_from_sleep()
+                else:
+                    print("[Filter] Sunday sleep mode mein hai; pehle 'Wake up Sunday' boliye.")
+            else:
+                process_command(command, from_text=True)
         except Exception as e:
             print(f"[Sunday] Text command failed ({type(e).__name__}).")
         finally:
@@ -2320,7 +2345,7 @@ def main():
     mode = "sleep"
 
     while True:
-        _process_pending_text_commands()
+        mode = _process_pending_text_commands(mode)
         try:
             with mic as source:
                 if mode == "sleep":
@@ -2368,18 +2393,7 @@ def main():
                     break
                 if is_wake(text):
                     mode = "command"
-                    if hud:
-                        try:
-                            hud.show_fullscreen()
-                        except Exception:
-                            pass
-                    globals()['hud_hidden'] = False
-                    name = memory.get_profile("name") if memory else None
-                    if name:
-                        speak(f"Yes {name.split()[0]}, I'm listening")
-                    else:
-                        speak("Yes, I'm listening")
-                    print("\n🎧 COMMAND MODE\n")
+                    _wake_from_sleep()
                 continue
 
             if mode == "command":
