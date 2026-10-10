@@ -609,6 +609,130 @@ def http_headers(target):
     return f"Could not connect to {target}"
 
 
+def security_headers_check(target):
+    target = _clean_target(target)
+    if not target:
+        return "Invalid domain."
+    safe, msg = _safety_check(target)
+    if not safe:
+        audit_log("security_headers", target, f"blocked: {msg}")
+        return msg
+    if not REQUESTS_OK:
+        return "requests not installed."
+
+    try:
+        response = requests.get(
+            f"https://{target}",
+            timeout=8,
+            allow_redirects=False,
+        )
+    except Exception as e:
+        audit_log("security_headers", target, f"failed: {e}")
+        return f"Security header check failed: {e}"
+
+    headers = response.headers
+    checked_headers = [
+        "Strict-Transport-Security",
+        "Content-Security-Policy",
+        "X-Content-Type-Options",
+        "X-Frame-Options",
+        "Referrer-Policy",
+        "Permissions-Policy",
+    ]
+    missing = [name for name in checked_headers if not headers.get(name)]
+    final_url = getattr(response, "url", f"https://{target}")
+    if not final_url.lower().startswith("https://"):
+        missing.insert(0, "HTTPS redirect (final URL is not HTTPS)")
+    redirect_note = ""
+    if 300 <= response.status_code < 400:
+        redirect_note = ". Redirect not followed to avoid leaving the authorized scope"
+
+    audit_log(
+        "security_headers",
+        target,
+        f"ok: {len(checked_headers) - len([h for h in checked_headers if h in missing])} present, {len(missing)} missing",
+    )
+    if missing:
+        return (
+            f"HTTP {response.status_code}. Missing/review: "
+            f"{', '.join(missing)}. Present: "
+            f"{', '.join(name for name in checked_headers if headers.get(name)) or 'none'}"
+            f"{redirect_note}"
+        )
+    return (
+        f"HTTP {response.status_code}. All checked security headers are present."
+        f"{redirect_note}"
+    )
+
+
+def email_dns_check(target):
+    target = _clean_target(target)
+    if not target:
+        return "Invalid domain."
+    safe, msg = _safety_check(target)
+    if not safe:
+        audit_log("email_dns_check", target, f"blocked: {msg}")
+        return msg
+    if not DNS_OK:
+        return "dnspython not installed; email DNS posture check is unavailable."
+
+    try:
+        txt_records = dns.resolver.resolve(target, "TXT", lifetime=5)
+        spf_records = [
+            str(record).strip('"')
+            for record in txt_records
+            if re.search(r"\bv=spf1\b", str(record), re.IGNORECASE)
+        ]
+    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+        spf_records = []
+    except Exception as e:
+        audit_log("email_dns_check", target, f"failed: {e}")
+        return f"Email DNS lookup failed for {target}: {e}"
+
+    try:
+        dmarc_records = dns.resolver.resolve(
+            f"_dmarc.{target}", "TXT", lifetime=5
+        )
+        dmarc_records = [
+            str(record).strip('"')
+            for record in dmarc_records
+            if re.search(r"\bv=dmarc1\b", str(record), re.IGNORECASE)
+        ]
+    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+        dmarc_records = []
+    except Exception as e:
+        audit_log("email_dns_check", target, f"failed: {e}")
+        return f"Email DNS lookup failed for {target}: {e}"
+
+    findings = []
+    if not spf_records:
+        findings.append("no SPF record found")
+    elif len(spf_records) > 1:
+        findings.append(f"{len(spf_records)} SPF records found; review for duplicates")
+    else:
+        findings.append(f"SPF: {spf_records[0][:180]}")
+
+    if not dmarc_records:
+        findings.append("no DMARC record found")
+    else:
+        policy = re.search(
+            r"(?:^|;)\s*p\s*=\s*(none|quarantine|reject)\b",
+            dmarc_records[0],
+            re.IGNORECASE,
+        )
+        if policy:
+            findings.append(f"DMARC policy: {policy.group(1).lower()}")
+        else:
+            findings.append("DMARC record found; policy could not be read")
+
+    audit_log(
+        "email_dns_check",
+        target,
+        f"ok: {len(spf_records)} SPF, {len(dmarc_records)} DMARC",
+    )
+    return ". ".join(findings)
+
+
 def http_methods(target):
     target = _clean_target(target)
     if not target:
@@ -1124,6 +1248,19 @@ def handle_hunter_command(text):
 
     # ---- Tools ----
 
+    # Passive security posture checks
+    for prefix in ("security headers ", "header audit ", "check security headers "):
+        if t.startswith(prefix):
+            target = t[len(prefix):].strip()
+            if target:
+                return security_headers_check(target), True
+
+    for prefix in ("email dns ", "email security ", "spf dmarc "):
+        if t.startswith(prefix):
+            target = t[len(prefix):].strip()
+            if target:
+                return email_dns_check(target), True
+
     # DNS
     if t.startswith("dns lookup ") or t.startswith("dns check "):
         target = t.replace("dns lookup ", "").replace("dns check ", "").strip()
@@ -1227,6 +1364,7 @@ def handle_hunter_command(text):
         return (
             "Commands: 'accept terms', 'add to scope X', 'show scope', 'dns X', "
             "'http headers X', 'http methods X', 'robots check X', 'ssl X', "
+            "'security headers X', 'email dns X' (SPF/DMARC posture), "
             "'port scan X', 'subdomain scan X', 'wayback X', 'tech detect X', 'whois X', "
             "'payload xss/sqli/ssrf/lfi', 'save finding X: desc', 'show findings', "
             "'generate report', 'bot dns X', 'stop bot', 'bot status', 'hunter exit'."

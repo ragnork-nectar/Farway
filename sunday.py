@@ -14,6 +14,9 @@ import time
 import threading
 import subprocess
 import webbrowser
+import queue
+import shlex
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -72,31 +75,32 @@ CODE_DIR.mkdir(exist_ok=True)
 MEMORY_DIR.mkdir(exist_ok=True)
 
 load_dotenv(ROOT_DIR / ".env")
-pyautogui.FAILSAFE = False
+pyautogui.FAILSAFE = True
 
 
 # ============================================================
 # 1) LOAD API KEYS
 # ============================================================
-API_KEYS = []
-for i in range(1, 20):
-    key = os.getenv(f"GEMINI_API_KEY_{i}")
-    if key and key.strip():
-        API_KEYS.append(key.strip())
+def _load_api_keys(environ):
+    numbered_api_keys = []
+    for name, value in environ.items():
+        match = re.fullmatch(r"GEMINI_API_KEY_(\d+)", name)
+        if match and value and value.strip():
+            numbered_api_keys.append((int(match.group(1)), value.strip()))
+    keys = [key for _, key in sorted(numbered_api_keys)]
 
-single_key = os.getenv("GEMINI_API_KEY")
-if single_key and single_key.strip():
-    API_KEYS.append(single_key.strip())
+    single_key = environ.get("GEMINI_API_KEY")
+    if single_key and single_key.strip():
+        keys.append(single_key.strip())
 
-_seen = set()
-_unique = []
-for k in API_KEYS:
-    if k not in _seen:
-        _seen.add(k)
-        _unique.append(k)
-API_KEYS = _unique
+    return list(dict.fromkeys(keys))
+
+
+API_KEYS = _load_api_keys(os.environ)
 
 EXHAUSTED_KEYS = set()
+API_KEY_CURSOR = 0
+API_KEY_LOCK = threading.Lock()
 
 
 # ============================================================
@@ -108,6 +112,70 @@ speaker = None
 kb_listener = None
 hud_hidden = False
 HUNTER_MODE = False
+TEXT_COMMAND_QUEUE = queue.Queue()
+TERMINAL_INPUT_READY = threading.Event()
+PENDING_PERMISSION_LOCK = threading.Lock()
+PENDING_PERMISSION = None
+TERMINAL_CWD = ROOT_DIR
+
+
+def request_permission(action):
+    """Ask for explicit approval in the same terminal used for commands."""
+    global PENDING_PERMISSION
+    if not TERMINAL_INPUT_READY.is_set():
+        print(f"[Permission] Refused because terminal input is unavailable: {action}")
+        return False
+
+    response = {"approved": False}
+    completed = threading.Event()
+    with PENDING_PERMISSION_LOCK:
+        if PENDING_PERMISSION is not None:
+            print("[Permission] Another confirmation is already pending.")
+            return False
+        PENDING_PERMISSION = (response, completed)
+
+    print(f"\n[Permission] Sunday wants to: {action}")
+    print("Terminal mein yes/no type karke Enter dabayein (default: no).")
+    if not completed.wait(timeout=120):
+        with PENDING_PERMISSION_LOCK:
+            PENDING_PERMISSION = None
+        print("[Permission] Timed out; action cancelled.")
+    return response["approved"]
+
+
+def _terminal_input_loop():
+    global PENDING_PERMISSION
+    TERMINAL_INPUT_READY.set()
+    print("[Sunday] Text commands isi terminal mein likhein. Permission ke liye yes/no.")
+    print("[Sunday] Terminal command example: run command python --version")
+
+    while True:
+        try:
+            line = input("Sunday > ").strip()
+        except (EOFError, OSError):
+            TERMINAL_INPUT_READY.clear()
+            with PENDING_PERMISSION_LOCK:
+                pending = PENDING_PERMISSION
+                if pending is not None:
+                    response, completed = pending
+                    response["approved"] = False
+                    PENDING_PERMISSION = None
+                    completed.set()
+            print("\n[Sunday] Terminal input unavailable; permission-gated actions will be refused.")
+            return
+
+        with PENDING_PERMISSION_LOCK:
+            pending = PENDING_PERMISSION
+            if pending is not None:
+                response, completed = pending
+                response["approved"] = line.lower() in ("y", "yes")
+                PENDING_PERMISSION = None
+                completed.set()
+                print("[Permission] Approved." if response["approved"] else "[Permission] Denied.")
+                continue
+
+        if line:
+            TEXT_COMMAND_QUEUE.put(line)
 
 
 # ============================================================
@@ -242,6 +310,12 @@ def get_personal_reply(text):
 # 5) ANTI-ECHO FILTER
 # ============================================================
 KNOWN_COMMAND_KEYWORDS = [
+    # Screen interaction
+    "move cursor", "move mouse", "cursor to", "mouse to", "click at",
+    "cursor center", "cursor beech mein", "move left", "move right",
+    "move up", "move down", "double click at", "right click at",
+    "left click", "right click", "double click", "click", "scroll up",
+    "scroll down", "type ",
     # System
     "open", "khol", "launch", "start", "chalu", "close", "band",
     "volume", "awaaz", "aawaz", "sound", "mute", "unmute",
@@ -632,32 +706,45 @@ def media_stop():
 # 12) SYSTEM
 # ============================================================
 def system_lock():
+    if not request_permission("PC ko lock karna"):
+        return "PC lock nahi kiya; permission nahi mili."
     import ctypes
     ctypes.windll.user32.LockWorkStation()
     return "Locking screen"
 
 
 def system_shutdown(delay=30):
-    os.system(f"shutdown /s /t {delay}")
+    if not request_permission(f"PC ko {delay} seconds mein shutdown karna"):
+        return "Shutdown cancel kiya; permission nahi mili."
+    subprocess.run(["shutdown", "/s", "/t", str(delay)], check=False)
     return f"Shutting down in {delay} seconds"
 
 
 def system_restart(delay=30):
-    os.system(f"shutdown /r /t {delay}")
+    if not request_permission(f"PC ko {delay} seconds mein restart karna"):
+        return "Restart cancel kiya; permission nahi mili."
+    subprocess.run(["shutdown", "/r", "/t", str(delay)], check=False)
     return f"Restarting in {delay} seconds"
 
 
 def system_cancel_shutdown():
-    os.system("shutdown /a")
+    subprocess.run(["shutdown", "/a"], check=False)
     return "Shutdown cancelled"
 
 
 def system_sleep_pc():
-    os.system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
+    if not request_permission("PC ko sleep mode mein bhejna"):
+        return "Sleep nahi kiya; permission nahi mili."
+    subprocess.run(
+        ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"],
+        check=False,
+    )
     return "Going to sleep"
 
 
 def system_screenshot():
+    if not request_permission("Screen ka screenshot lena aur Pictures folder mein save karna"):
+        return "Screenshot nahi liya; permission nahi mili."
     SCREENSHOT_DIR = Path.home() / "Pictures" / "Sunday_Screenshots"
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     path = SCREENSHOT_DIR / f"shot_{datetime.now():%Y%m%d_%H%M%S}.png"
@@ -740,6 +827,11 @@ def file_read(filename):
 
 def file_write(filename, content, code=False):
     path = _resolve_user_path(filename, code=code)
+    action = f"'{path.name}' file mein likhna"
+    if path.exists():
+        action = f"'{path.name}' file ko overwrite karna"
+    if not request_permission(action):
+        return "File update nahi ki; permission nahi mili."
     try:
         path.write_text(content, encoding="utf-8")
         return f"Written to {path.name}"
@@ -749,6 +841,8 @@ def file_write(filename, content, code=False):
 
 def file_append(filename, content):
     path = _resolve_user_path(filename)
+    if not request_permission(f"'{path.name}' file ke end mein text jodna"):
+        return "File update nahi ki; permission nahi mili."
     try:
         with path.open("a", encoding="utf-8") as f:
             f.write(content + "\n")
@@ -761,6 +855,8 @@ def file_delete(filename):
     path = _resolve_user_path(filename)
     if not path.exists():
         return f"{path.name} not found"
+    if not request_permission(f"'{path.name}' file permanently delete karna"):
+        return "File delete nahi ki; permission nahi mili."
     try:
         path.unlink()
         return f"Deleted {path.name}"
@@ -914,12 +1010,18 @@ def _extract_code(raw):
 
 
 def _get_available_keys():
-    available = [k for k in API_KEYS if k not in EXHAUSTED_KEYS]
-    if not available:
-        print("[AI] All keys exhausted — resetting")
-        EXHAUSTED_KEYS.clear()
-        available = list(API_KEYS)
-    return available
+    global API_KEY_CURSOR
+    if not API_KEYS:
+        return []
+
+    with API_KEY_LOCK:
+        if len(EXHAUSTED_KEYS) >= len(API_KEYS):
+            print("[AI] All keys reached their limit; starting a new key cycle")
+            EXHAUSTED_KEYS.clear()
+
+        start = API_KEY_CURSOR % len(API_KEYS)
+        ordered_keys = API_KEYS[start:] + API_KEYS[:start]
+        return [key for key in ordered_keys if key not in EXHAUSTED_KEYS]
 
 
 def _is_quota_error(err_lower):
@@ -935,13 +1037,14 @@ def _is_server_busy(err_lower):
     ))
 
 
-def _call_gemini(prompt, max_attempts_per_key=2):
-    if not API_KEYS:
-        return None
+def _create_gemini_client(api_key):
+    from google import genai
+    return genai.Client(api_key=api_key)
 
-    try:
-        from google import genai
-    except ImportError:
+
+def _call_gemini(prompt, max_attempts_per_key=2):
+    global API_KEY_CURSOR
+    if not API_KEYS:
         return None
 
     if hud:
@@ -953,14 +1056,18 @@ def _call_gemini(prompt, max_attempts_per_key=2):
 
     models_to_try = ["gemini-flash-latest", "gemini-3.8-flash", "gemini-2.5-flash"]
 
-    for key_index, api_key in enumerate(_get_available_keys()):
-        short_key = api_key[-8:] if len(api_key) > 8 else api_key
-        print(f"\n[AI] Trying key #{key_index + 1} (...{short_key})")
+    for api_key in _get_available_keys():
+        key_index = API_KEYS.index(api_key)
+        print(f"\n[AI] Trying key #{key_index + 1}")
 
         try:
-            client = genai.Client(api_key=api_key)
+            client = _create_gemini_client(api_key)
+        except ImportError:
+            return None
         except Exception:
-            EXHAUSTED_KEYS.add(api_key)
+            with API_KEY_LOCK:
+                EXHAUSTED_KEYS.add(api_key)
+                API_KEY_CURSOR = (key_index + 1) % len(API_KEYS)
             continue
 
         key_exhausted = False
@@ -968,14 +1075,16 @@ def _call_gemini(prompt, max_attempts_per_key=2):
         for model_name in models_to_try:
             for attempt in range(max_attempts_per_key):
                 try:
-                    print(f"[AI]   → {model_name} (attempt {attempt + 1})")
+                    print(f"[AI]   Trying {model_name} (attempt {attempt + 1})")
                     response = client.models.generate_content(
                         model=model_name,
                         contents=prompt,
                     )
                     text = (response.text or "").strip()
                     if text:
-                        print(f"[AI] ✅ Success with key #{key_index + 1}, {len(text)} chars")
+                        print(f"[AI] Success with key #{key_index + 1}, {len(text)} chars")
+                        with API_KEY_LOCK:
+                            API_KEY_CURSOR = (key_index + 1) % len(API_KEYS)
                         if hud:
                             try:
                                 if HUNTER_MODE:
@@ -992,21 +1101,26 @@ def _call_gemini(prompt, max_attempts_per_key=2):
                 except Exception as e:
                     err_lower = str(e).lower()
                     if _is_quota_error(err_lower):
-                        print(f"[AI]   ❌ Quota exhausted")
-                        EXHAUSTED_KEYS.add(api_key)
+                        print("[AI]   Quota exhausted")
+                        with API_KEY_LOCK:
+                            EXHAUSTED_KEYS.add(api_key)
+                            API_KEY_CURSOR = (key_index + 1) % len(API_KEYS)
                         key_exhausted = True
                         break
                     if _is_server_busy(err_lower):
-                        print(f"[AI]   ⏳ Server busy, retrying...")
+                        print("[AI]   Server busy, retrying...")
                         time.sleep(2)
                         continue
-                    print(f"[AI]   ⚠️  Error: {str(e)[:100]}")
+                    print(f"[AI] Request failed ({type(e).__name__}); trying next option.")
                     break
 
             if key_exhausted:
                 break
 
-    print("[AI] ❌ All API keys exhausted")
+        with API_KEY_LOCK:
+            API_KEY_CURSOR = (key_index + 1) % len(API_KEYS)
+
+    print("[AI] All API keys exhausted")
     if hud:
         try:
             if HUNTER_MODE:
@@ -1150,14 +1264,20 @@ def is_code_run_request(text):
 # 19) CODE WORKFLOWS
 # ============================================================
 def workflow_generate_code(description):
+    filename = detect_filename(description)
+    path = _resolve_user_path(filename, code=True)
+    action = f"AI se code banwana aur '{path.name}' mein save karna"
+    if path.exists():
+        action = f"AI se code banwana aur '{path.name}' overwrite karna"
+    if not request_permission(action):
+        speak("Code generate nahi kiya; permission nahi mili.")
+        return
     speak("Let me write that code for you")
     code = ai_generate_code(description)
     if not code:
-        speak("Sorry, all API keys are exhausted.")
+        speak("Cloud AI abhi available nahi hai; code generate nahi ho saka.")
         return
 
-    filename = detect_filename(description)
-    path = _resolve_user_path(filename, code=True)
     try:
         path.write_text(code, encoding="utf-8")
         lines = len(code.splitlines())
@@ -1177,6 +1297,12 @@ def workflow_fix_code(filename):
         if not path.exists():
             speak(f"File {filename} not found")
             return
+
+    if not request_permission(
+        f"'{path.name}' ka content Google AI ko bhejna aur file update karna"
+    ):
+        speak("File change nahi ki; permission nahi mili.")
+        return
 
     try:
         original = path.read_text(encoding="utf-8", errors="ignore")
@@ -1204,6 +1330,12 @@ def workflow_improve_code(filename):
         if not path.exists():
             speak(f"File {filename} not found")
             return
+
+    if not request_permission(
+        f"'{path.name}' ka content Google AI ko bhejna aur file update karna"
+    ):
+        speak("File change nahi ki; permission nahi mili.")
+        return
 
     try:
         original = path.read_text(encoding="utf-8", errors="ignore")
@@ -1233,6 +1365,9 @@ def workflow_run_code(filename):
             return
 
     if path.suffix.lower() == ".py":
+        if not request_permission(f"'{path.name}' Python code execute karna"):
+            speak("Code run nahi kiya; permission nahi mili.")
+            return
         speak("Running the code")
         try:
             subprocess.Popen(
@@ -1297,12 +1432,12 @@ def exit_hunter_mode():
             hud.exit_hunter()
         except Exception:
             try:
-                hud.set_palette("amber")
+                hud.set_palette("cyan")
                 hud.set_state("idle")
             except Exception:
                 pass
 
-    return "Normal mode active. HUD back to amber."
+    return "Normal mode active. HUD back to cyan."
 
 
 def handle_hunter_command(text):
@@ -1315,16 +1450,307 @@ def handle_hunter_command(text):
         return f"Hunter error: {e}", True
 
 
+def handle_screen_command(raw_text, normalized_text):
+    if normalized_text in (
+        "move cursor to center",
+        "move mouse to center",
+        "cursor center",
+        "cursor beech mein",
+    ):
+        width, height = pyautogui.size()
+        x, y = width // 2, height // 2
+        try:
+            pyautogui.moveTo(x, y, duration=0.25)
+            return f"Cursor center x={x}, y={y} par move kar diya."
+        except Exception as e:
+            return f"Cursor move nahi ho saka: {e}"
+
+    relative_move = re.fullmatch(
+        r"move (?:cursor|mouse) (left|right|up|down)(?:\s+(\d+))?",
+        normalized_text,
+    )
+    if relative_move:
+        direction, amount_text = relative_move.groups()
+        amount = min(500, max(1, int(amount_text or "100")))
+        x, y = pyautogui.position()
+        width, height = pyautogui.size()
+        offsets = {
+            "left": (-amount, 0),
+            "right": (amount, 0),
+            "up": (0, -amount),
+            "down": (0, amount),
+        }
+        dx, dy = offsets[direction]
+        x = min(width - 1, max(0, x + dx))
+        y = min(height - 1, max(0, y + dy))
+        try:
+            pyautogui.moveTo(x, y, duration=0.2)
+            return f"Cursor {direction} move kar diya."
+        except Exception as e:
+            return f"Cursor move nahi ho saka: {e}"
+
+    coordinate_text = normalized_text
+    hinglish_move = re.fullmatch(
+        r"cursor ko\s+(\d+)[,\s]+(\d+)\s+(?:par\s+)?(?:le jao|move karo)",
+        coordinate_text,
+    )
+    if hinglish_move:
+        x_text, y_text = hinglish_move.groups()
+        coordinate_text = f"cursor to {x_text} {y_text}"
+
+    coordinate_command = re.fullmatch(
+        r"(?:move cursor to|move mouse to|cursor to|mouse to)\s+(\d+)[,\s]+(\d+)",
+        coordinate_text,
+    )
+    if coordinate_command:
+        x, y = map(int, coordinate_command.groups())
+        width, height = pyautogui.size()
+        if x >= width or y >= height:
+            return f"Coordinates screen ke bahar hain. Screen: {width}x{height}."
+        try:
+            pyautogui.moveTo(x, y, duration=0.25)
+            return f"Cursor x={x}, y={y} par move kar diya."
+        except Exception as e:
+            return f"Cursor move nahi ho saka: {e}"
+
+    hinglish_click = re.fullmatch(
+        r"(click karo|right click karo|double click karo)\s+(\d+)[,\s]+(\d+)(?:\s+par)?",
+        normalized_text,
+    )
+    click_text = normalized_text
+    if hinglish_click:
+        kind, x_text, y_text = hinglish_click.groups()
+        kind = {
+            "click karo": "click at",
+            "right click karo": "right click at",
+            "double click karo": "double click at",
+        }[kind]
+        click_text = f"{kind} {x_text} {y_text}"
+
+    click_command = re.fullmatch(
+        r"(left click at|click at|right click at|double click at)\s+(\d+)[,\s]+(\d+)",
+        click_text,
+    )
+    if click_command:
+        kind, x_text, y_text = click_command.groups()
+        x, y = int(x_text), int(y_text)
+        width, height = pyautogui.size()
+        if x >= width or y >= height:
+            return f"Coordinates screen ke bahar hain. Screen: {width}x{height}."
+        button = "right" if kind == "right click at" else "left"
+        clicks = 2 if kind == "double click at" else 1
+        try:
+            pyautogui.click(x=x, y=y, clicks=clicks, interval=0.1, button=button)
+            return f"{kind.title()} x={x}, y={y} par kar diya."
+        except Exception as e:
+            return f"Click nahi ho saka: {e}"
+
+    current_clicks = {
+        "click": ("left", 1),
+        "left click": ("left", 1),
+        "right click": ("right", 1),
+        "double click": ("left", 2),
+    }
+    if normalized_text in current_clicks:
+        button, clicks = current_clicks[normalized_text]
+        try:
+            pyautogui.click(button=button, clicks=clicks, interval=0.1)
+            return f"{normalized_text.title()} kar diya."
+        except Exception as e:
+            return f"Click nahi ho saka: {e}"
+
+    scroll_text = normalized_text.replace("scroll upar", "scroll up").replace(
+        "scroll neeche", "scroll down"
+    )
+    scroll_command = re.fullmatch(r"scroll (up|down)(?:\s+(\d+))?", scroll_text)
+    if scroll_command:
+        direction, amount_text = scroll_command.groups()
+        amount = min(10, max(1, int(amount_text or "3")))
+        signed_amount = amount if direction == "up" else -amount
+        try:
+            pyautogui.scroll(signed_amount)
+            return f"Screen {direction} scroll kar di."
+        except Exception as e:
+            return f"Scroll nahi ho saka: {e}"
+
+    text_prefixes = ("screen par type karo ", "type karo ", "type:", "type ")
+    prefix = next(
+        (item for item in text_prefixes if normalized_text.startswith(item)),
+        None,
+    )
+    if prefix:
+        separator_length = len(prefix)
+        text_to_type = raw_text[separator_length:].strip()
+        if not text_to_type:
+            return "Type karne ke liye text bhi dein. Example: type Hello world"
+        if len(text_to_type) > 1000:
+            return "Ek command mein maximum 1000 characters type kar sakta hoon."
+        if not text_to_type.isascii():
+            return "Abhi screen typing sirf English/ASCII text support karti hai."
+        try:
+            print("[Sunday] Target app par switch karein; 3 seconds mein typing shuru hogi.")
+            time.sleep(3)
+            pyautogui.write(text_to_type, interval=0.01)
+            return f"{len(text_to_type)} characters type kar diye."
+        except Exception as e:
+            return f"Text type nahi ho saka: {e}"
+
+    return None
+
+
+def _inside_project(path):
+    return path == ROOT_DIR or ROOT_DIR in path.parents
+
+
+def _parse_terminal_command(command):
+    if not command or len(command) > 500:
+        raise ValueError("Command khaali hai ya 500 characters se lamba hai.")
+    if any(char in command for char in ("&", "|", ";", "<", ">", "`", "\n", "\r")):
+        raise ValueError("Pipelines, chaining aur shell operators allowed nahi hain.")
+
+    lexer = shlex.shlex(command, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    lexer.escape = ""
+    return list(lexer)
+
+
+def _run_terminal_command(raw_command):
+    global TERMINAL_CWD
+
+    try:
+        args = _parse_terminal_command(raw_command)
+    except ValueError as exc:
+        return str(exc)
+    if not args:
+        return "Command specify karein."
+
+    name = args[0].lower()
+    if name in ("pwd",):
+        return str(TERMINAL_CWD)
+    if name in ("dir", "ls"):
+        if len(args) != 1:
+            return "Listing ke liye sirf `dir` ya `ls` use karein."
+        try:
+            entries = sorted(TERMINAL_CWD.iterdir(), key=lambda path: (not path.is_dir(), path.name.lower()))
+            return "\n".join(
+                f"{'[DIR] ' if path.is_dir() else '       '}{path.name}"
+                for path in entries
+            ) or "(folder khaali hai)"
+        except OSError as exc:
+            return f"Folder list nahi ho saka: {exc}"
+    if name == "cd":
+        target_text = args[1] if len(args) == 2 else "."
+        target = (TERMINAL_CWD / target_text).resolve()
+        if not _inside_project(target):
+            return "Sunday terminal navigation ko project folder ke andar rakhta hai."
+        if not target.is_dir():
+            return "Folder nahi mila."
+        TERMINAL_CWD = target
+        return f"Current folder: {TERMINAL_CWD}"
+    if name in ("open", "start") and len(args) == 2 and args[1].lower() in ("terminal", "cmd"):
+        return "Sunday isi terminal mein chal raha hai; yahin command likhein."
+
+    executable_args = None
+    if name in ("python", "py"):
+        script_index = 1
+        if len(args) > 1 and args[1] in ("--version", "-V"):
+            if len(args) != 2:
+                return "Version check ke liye `python --version` use karein."
+            executable_args = [sys.executable, "--version"]
+        else:
+            if len(args) <= script_index or args[script_index].startswith("-"):
+                return "Sirf `python --version` ya project ke andar `.py` file run kar sakte hain."
+            script_path = (TERMINAL_CWD / args[script_index]).resolve()
+            if script_path.suffix.lower() != ".py" or not _inside_project(script_path) or not script_path.is_file():
+                return "Python script project folder ke andar honi chahiye."
+            executable_args = [sys.executable, str(script_path), *args[script_index + 1:]]
+    elif name == "pytest":
+        pytest_args = [arg for arg in args[1:] if arg not in ("-q", "-v")]
+        if any(
+            Path(arg).is_absolute()
+            or (arg not in ("tests", "tests/") and not arg.startswith("tests\\") and not arg.startswith("tests/"))
+            for arg in pytest_args
+        ):
+            return "Pytest ko sirf `-q`, `-v`, ya `tests` folder ke andar ke paths ke saath chala sakte hain."
+        executable_args = [sys.executable, "-m", "pytest", *args[1:]]
+    elif name == "git":
+        safe_git_commands = {"status", "diff", "log", "show", "branch"}
+        if len(args) < 2 or args[1] not in safe_git_commands:
+            return "Git ke liye filhaal status, diff, log, show, aur branch read-only commands available hain."
+        if any(arg in ("--output", "--exec-path", "-c", "--config-env") for arg in args[2:]):
+            return "Yeh git option allowed nahi hai."
+        executable_args = args
+    elif name in ("where", "whoami", "hostname", "ipconfig", "systeminfo", "tree"):
+        if name != "where" and len(args) != 1:
+            return f"`{name}` ke saath extra arguments allowed nahi hain."
+        if name == "where" and len(args) != 2:
+            return "`where` ke saath ek hi program name dein."
+        executable_args = args
+    else:
+        return (
+            "Yeh command allow-list mein nahi hai. Abhi python project scripts, pytest, "
+            "read-only git, aur basic system-info commands supported hain."
+        )
+
+    if not request_permission(f"terminal mein yeh command run karna: {raw_command}"):
+        return "Command cancel kar di; permission nahi mili."
+
+    try:
+        result = subprocess.run(
+            executable_args,
+            cwd=TERMINAL_CWD,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return "Command 30 seconds mein complete nahi hui; rok di gayi."
+    except OSError as exc:
+        return f"Command start nahi ho saki: {exc}"
+
+    output = (result.stdout or "") + (result.stderr or "")
+    output = output.strip()
+    if not output:
+        output = "(koi output nahi)"
+    if len(output) > 6000:
+        output = output[:6000] + "\n...[output truncated]"
+    return f"Exit code: {result.returncode}\n{output}"
+
+
+def handle_terminal_command(raw_text):
+    command = raw_text.strip()
+    lowered = command.lower()
+    if lowered in ("open terminal", "terminal kholo", "cmd kholo"):
+        return "Sunday isi terminal mein chal raha hai; yahin text command likh sakte hain."
+
+    prefixes = ("run command ", "terminal run ", "command run ")
+    prefix = next((item for item in prefixes if lowered.startswith(item)), None)
+    if prefix:
+        result = _run_terminal_command(command[len(prefix):].strip())
+        print(f"\n[Terminal output]\n{result}\n")
+        return "Command ka status aur output terminal mein check karein."
+    return None
+
+
 # ============================================================
 # 21) COMMAND HANDLER
 # ============================================================
-def process_command(c):
+def process_command(c, from_text=False):
     global HUNTER_MODE
 
-    c = c.lower().strip()
-    original = c
-    print(f"[You] {original}")
+    original = c.strip()
+    c = original.lower()
+    print(f"[You] {c}")
     words = c.split()
+
+    terminal_result = handle_terminal_command(original)
+    if terminal_result is not None:
+        speak(terminal_result)
+        return
 
     # ---- PERSONAL REPLIES (both modes, offline) ----
     personal = get_personal_reply(c)
@@ -1350,11 +1776,16 @@ def process_command(c):
         return
 
     # ---- NORMAL MODE ----
-    if is_system_noise(c):
+    screen_result = handle_screen_command(original, c)
+    if screen_result is not None:
+        speak(screen_result)
+        return
+
+    if not from_text and is_system_noise(c):
         print(f"[Filter] Ignored system audio: '{c}'")
         return
 
-    if not is_command_like(c):
+    if not from_text and not is_command_like(c):
         print(f"[Filter] No command keyword — ignoring: '{c}'")
         return
 
@@ -1362,7 +1793,11 @@ def process_command(c):
         speak("Okay, stopped.")
         return
 
-    if detect_and_save_memory(original):
+    memory_saved = detect_and_save_memory(original)
+    if memory_saved is None:
+        speak("Memory update nahi ki; permission nahi mili.")
+        return
+    if memory_saved:
         name = memory.get_profile("name") if memory else None
         if name:
             speak(f"Got it, I will remember that, {name.split()[0]}")
@@ -1398,12 +1833,18 @@ def process_command(c):
     if c.startswith("remember ") or c.startswith("yaad rakho "):
         fact = c.replace("remember ", "").replace("yaad rakho ", "").strip()
         if fact and memory:
+            if not request_permission("assistant ki saved memory mein yeh fact add karna"):
+                speak("Memory update nahi ki; permission nahi mili.")
+                return
             memory.add_fact(fact)
             speak(f"Okay, I will remember: {fact}")
         return
 
     if c.startswith("forget ") or c.startswith("bhool jao "):
         what = c.replace("forget ", "").replace("bhool jao ", "").strip()
+        if memory and not request_permission(f"saved memory se '{what}' delete karna"):
+            speak("Memory update nahi ki; permission nahi mili.")
+            return
         if memory and memory.delete_profile(what):
             speak(f"Forgot {what}")
         else:
@@ -1411,6 +1852,9 @@ def process_command(c):
         return
 
     if "forget everything" in c or "clear memory" in c or "sab bhool jao" in c:
+        if not request_permission("assistant ki saved memory clear karna"):
+            speak("Memory clear nahi ki; permission nahi mili.")
+            return
         if memory:
             memory.clear_all()
         speak("All memory cleared")
@@ -1653,10 +2097,16 @@ def process_command(c):
 
     # UNKNOWN → AI
     if API_KEYS:
+        if not request_permission(
+            "aapka message aur related saved memory Google AI ko bhejna"
+        ):
+            speak("Cloud AI request nahi bheji; permission nahi mili.")
+            return
         speak("Let me think")
         memory_context = memory.build_context() if memory else ""
         prompt = (
-            "You are Sunday, a helpful female voice assistant. "
+            "You are Sunday, a helpful voice assistant. "
+            "Reply in natural Hinglish (Hindi written in Latin script with common English words). "
             "Answer in 1-2 short sentences suitable for voice. "
         )
         if memory_context:
@@ -1672,7 +2122,7 @@ def process_command(c):
                 memory.add_message("assistant", short)
             speak(short, allow_stop=True)
         else:
-            speak("Sorry, all API keys are exhausted.")
+            speak("Cloud AI abhi available nahi hai; thodi der baad try karein.")
     else:
         speak("I didn't understand that")
 
@@ -1680,6 +2130,29 @@ def process_command(c):
 # ============================================================
 # 22) MAIN ENTRY
 # ============================================================
+def start_terminal_input():
+    threading.Thread(
+        target=_terminal_input_loop,
+        name="SundayTerminalInput",
+        daemon=True,
+    ).start()
+    TERMINAL_INPUT_READY.wait(timeout=1)
+
+
+def _process_pending_text_commands():
+    while True:
+        try:
+            command = TEXT_COMMAND_QUEUE.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            process_command(command, from_text=True)
+        except Exception as e:
+            print(f"[Sunday] Text command failed ({type(e).__name__}).")
+        finally:
+            TEXT_COMMAND_QUEUE.task_done()
+
+
 def main():
     global memory, hud, kb_listener, HUNTER_MODE
 
@@ -1699,8 +2172,9 @@ def main():
 
     hud = init_hud(enabled=True, fullscreen=True)
     kb_listener = start_keyboard_listener()
+    start_terminal_input()
 
-    speak("Sunday is ready. Say wake up Sunday to activate me.")
+    speak("Sunday tayyar hai. Voice ke liye wake up Sunday boliye, ya isi terminal mein command type karein.")
 
     print("=" * 60)
     print(f"[Sunday] Owner: {OWNER_NAME}")
@@ -1737,6 +2211,7 @@ def main():
     mode = "sleep"
 
     while True:
+        _process_pending_text_commands()
         try:
             with mic as source:
                 if mode == "sleep":
@@ -1745,7 +2220,7 @@ def main():
                             hud.set_state("idle")
                         except Exception:
                             pass
-                    audio = recognizer.listen(source, timeout=8, phrase_time_limit=4)
+                    audio = recognizer.listen(source, timeout=1, phrase_time_limit=4)
                 else:
                     if hud:
                         try:
@@ -1755,15 +2230,15 @@ def main():
                                 hud.set_state("listening")
                         except Exception:
                             pass
-                    audio = recognizer.listen(source, timeout=6, phrase_time_limit=8)
+                    audio = recognizer.listen(source, timeout=1, phrase_time_limit=8)
 
             try:
-                text = recognizer.recognize_google(audio, language="en-IN").lower()
+                text = recognizer.recognize_google(audio, language="en-IN")
                 print(f"[Debug] Heard: '{text}'")
             except sr.UnknownValueError:
                 continue
-            except sr.RequestError as e:
-                print(f"[Debug] Google error: {e}")
+            except sr.RequestError:
+                print("[Voice] Speech service unavailable; text commands abhi bhi available hain.")
                 continue
 
             if not text:
@@ -1831,12 +2306,7 @@ def main():
             print("\n[Sunday] Ctrl+C — Stopping...")
             break
         except Exception as e:
-            err_msg = str(e)
-            if "'NoneType' object has no attribute" in err_msg:
-                continue
-            if "Tcl" in err_msg or "mainloop" in err_msg:
-                continue
-            print(f"[Error] {err_msg}")
+            print(f"[Sunday] Command process nahi ho saka ({type(e).__name__}).")
             continue
 
     print("\n🚪 Sunday stopped.\n")

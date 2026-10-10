@@ -63,10 +63,10 @@ class SundayHUD:
 
         # Colors — 5 states
         self.colors = {
-            "idle":      "#ff8c00",   # deep orange
-            "listening": "#ffa500",   # bright orange
-            "thinking":  "#ff6600",   # red-orange
-            "speaking":  "#ffcc00",   # golden yellow
+            "idle":      "#38c9f5",
+            "listening": "#91f3ff",
+            "thinking":  "#28a8ff",
+            "speaking":  "#d7fbff",
             "hunter":    "#ff2222",   # RED for hunter mode
         }
 

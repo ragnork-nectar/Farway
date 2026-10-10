@@ -84,7 +84,7 @@ class HUDController:
             self._write(self.full_text_file, "")
             self._write(self.playing_file, "")
             self._write(self.visible_file, "hide")
-            self._write(self.palette_file, "amber")
+            self._write(self.palette_file, "cyan")
 
             # Start small HUD
             self.small_process = multiprocessing.Process(
@@ -175,10 +175,10 @@ class HUDController:
         self._write(self.palette_file, "red")
 
     def exit_hunter(self):
-        """Switch HUD back to normal mode (amber palette)."""
+        """Switch HUD back to normal mode (cyan palette)."""
         if not self.enabled:
             return
-        self._write(self.palette_file, "amber")
+        self._write(self.palette_file, "cyan")
         self._write(self.state_file, "idle")
         self._write(self.full_state_file, "idle")
 

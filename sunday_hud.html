@@ -4,46 +4,130 @@
 <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600&display=swap" rel="stylesheet">
 <style>
 :root {
-  --bg: #05030a;
-  --fg: #ffe9c9;
-  --dim: #8f7a64;
-  --edge: #3a2616;
-  --accent: #ff9a2e;
+  --bg: #030710;
+  --fg: #d9f7ff;
+  --dim: #79a6b8;
+  --edge: rgba(91, 207, 255, 0.24);
+  --accent: #42d9ff;
   --font-ui: 'Chakra Petch', system-ui, -apple-system, 'Segoe UI', sans-serif;
   color-scheme: dark;
 }
 html, body { height: 100%; margin: 0; }
 body {
-  background: var(--bg);
+  background:
+    radial-gradient(ellipse at center, rgba(13, 54, 82, 0.3), transparent 58%),
+    linear-gradient(rgba(31, 116, 153, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(31, 116, 153, 0.035) 1px, transparent 1px),
+    var(--bg);
+  background-size: auto, 42px 42px, 42px 42px, auto;
   color: var(--fg);
   font-family: var(--font-ui);
   overflow: hidden;
   position: relative;
 }
+body::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0.15;
+  background: repeating-linear-gradient(
+    to bottom, transparent 0, transparent 3px,
+    rgba(114, 226, 255, 0.11) 4px
+  );
+}
 #stage { position: absolute; inset: 0; touch-action: none; cursor: grab; }
 #stage:active { cursor: grabbing; }
-#stage canvas { display: block; width: 100%; height: 100%; }
+#stage canvas { display: block; position: relative; z-index: 2; width: 100%; height: 100%; }
+.core-fallback {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 14%, transparent), transparent 31%);
+}
+.fallback-orb {
+  position: relative; width: min(34vw, 34vh, 340px); aspect-ratio: 1;
+  display: grid; place-items: center; border-radius: 50%;
+  filter: drop-shadow(0 0 34px color-mix(in srgb, var(--accent) 65%, transparent));
+  animation: core-breathe 3.2s ease-in-out infinite;
+}
+.fallback-orb::before, .fallback-orb::after, .fallback-ring {
+  content: ""; position: absolute; inset: 8%; border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--accent) 78%, transparent);
+  box-shadow: inset 0 0 24px color-mix(in srgb, var(--accent) 20%, transparent),
+    0 0 18px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.fallback-orb::before { inset: 1%; border-style: dashed; animation: orbit-spin 26s linear infinite; }
+.fallback-orb::after { inset: 19%; border-width: 2px; border-left-color: transparent; animation: orbit-spin 12s linear infinite reverse; }
+.fallback-ring.ring-two { inset: 28%; border-style: dotted; animation: orbit-spin 18s linear infinite; }
+.fallback-ring.ring-three { inset: 37%; border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.fallback-core {
+  width: 19%; aspect-ratio: 1; border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #fff 0 9%, #c9faff 22%, var(--accent) 58%, transparent 76%);
+  box-shadow: 0 0 24px var(--accent), 0 0 74px var(--accent), 0 0 150px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+@keyframes orbit-spin { to { transform: rotate(360deg); } }
+@keyframes core-breathe { 50% { transform: scale(1.045); filter: drop-shadow(0 0 50px color-mix(in srgb, var(--accent) 85%, transparent)); } }
+.hunter .fallback-orb { animation-duration: 1.4s; }
+
+.hud-frame {
+  position: absolute;
+  z-index: 3;
+  inset: 24px;
+  pointer-events: none;
+  border: 1px solid rgba(91, 207, 255, 0.13);
+  box-shadow: inset 0 0 50px rgba(25, 142, 187, 0.06), 0 0 35px rgba(25, 142, 187, 0.05);
+}
+.hud-frame::before, .hud-frame::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  background:
+    linear-gradient(var(--accent), var(--accent)) left top / 72px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) left top / 2px 72px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) right top / 72px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) right top / 2px 72px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) left bottom / 72px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) left bottom / 2px 72px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) right bottom / 72px 2px no-repeat,
+    linear-gradient(var(--accent), var(--accent)) right bottom / 2px 72px no-repeat;
+  filter: drop-shadow(0 0 5px var(--accent));
+}
+.hud-frame::after {
+  inset: 9px;
+  opacity: 0.28;
+  background:
+    linear-gradient(90deg, transparent, var(--accent), transparent) top / 44% 1px no-repeat,
+    linear-gradient(90deg, transparent, var(--accent), transparent) bottom / 44% 1px no-repeat;
+}
 
 .readout {
   position: absolute; top: 16px; left: 16px;
   font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase;
-  color: var(--dim); pointer-events: none;
+  color: var(--dim); pointer-events: none; z-index: 4;
   display: grid; gap: 6px; min-width: 180px;
 }
 .readout b { color: var(--fg); font-weight: 600; }
+.brand-line { display: flex; align-items: center; gap: 8px; color: var(--accent); }
+.status-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 12px var(--accent); animation: beacon 1.8s ease-in-out infinite;
+}
+@keyframes beacon { 50% { opacity: 0.35; transform: scale(0.75); } }
 .meter { height: 3px; background: var(--edge); position: relative; }
 .meter i { position: absolute; inset: 0 auto 0 0; width: 0%; background: var(--accent); box-shadow: 0 0 10px var(--accent); }
 
 .panel {
   position: absolute;
+  z-index: 4;
   font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase;
   color: var(--dim); pointer-events: none;
-  background: rgba(5, 3, 10, 0.55);
+  background: linear-gradient(135deg, rgba(5, 18, 30, 0.86), rgba(3, 7, 16, 0.55));
   border: 1px solid var(--edge);
   padding: 12px 16px;
   min-width: 200px;
   display: grid; gap: 6px;
-  backdrop-filter: blur(2px);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 0 24px rgba(34, 183, 232, 0.08), inset 0 0 18px rgba(34, 183, 232, 0.035);
 }
 .panel .row {
   display: flex; justify-content: space-between;
@@ -55,6 +139,7 @@ body {
   letter-spacing: 0.2em; border-bottom: 1px solid var(--edge);
   padding-bottom: 6px; margin-bottom: 2px;
 }
+.panel .row b { text-shadow: 0 0 10px rgba(66, 217, 255, 0.35); }
 .panel.top-right { top: 16px; right: 16px; }
 .panel.bottom-left { bottom: 16px; left: 16px; }
 .panel.bottom-right { bottom: 16px; right: 16px; }
@@ -68,6 +153,7 @@ body {
   font-size: 15px; letter-spacing: 0.08em; text-align: center;
   opacity: 0; transition: opacity 0.4s;
   pointer-events: none;
+  z-index: 5;
   text-shadow: 0 0 12px var(--accent);
 }
 .spoken-text.show { opacity: 1; border-color: var(--accent); box-shadow: 0 0 20px rgba(255, 154, 46, 0.25); }
@@ -75,17 +161,49 @@ body {
 .hint-bar {
   position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
   font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase;
-  color: var(--dim); pointer-events: none;
+  color: var(--dim); pointer-events: none; z-index: 4;
+  white-space: nowrap;
+}
+@media (max-width: 700px) {
+  .hud-frame { inset: 8px; }
+  .readout {
+    top: 12px; left: 12px; gap: 4px;
+    min-width: 110px; font-size: 9px; letter-spacing: 0.1em;
+  }
+  .panel {
+    min-width: 0; padding: 7px 9px; gap: 4px;
+    font-size: 9px; letter-spacing: 0.1em;
+  }
+  .panel .row { font-size: 9px; }
+  .panel .title { font-size: 9px; padding-bottom: 4px; }
+  .panel.top-right { top: 10px; right: 10px; }
+  .panel.bottom-left { bottom: 42px; left: 10px; }
+  .panel.bottom-right { bottom: 42px; right: 10px; }
+  .spoken-text { bottom: 74px; max-width: 78%; padding: 8px 12px; font-size: 12px; }
+  .hint-bar { bottom: 14px; max-width: 90%; font-size: 8px; letter-spacing: 0.08em; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; }
 }
 </style>
 
-<div id="stage" aria-label="Sunday AI Core"></div>
+<div id="stage" aria-label="Sunday AI Core">
+  <div class="core-fallback" id="coreFallback" aria-hidden="true">
+    <div class="fallback-orb">
+      <i class="fallback-ring ring-two"></i>
+      <i class="fallback-ring ring-three"></i>
+      <i class="fallback-core"></i>
+    </div>
+  </div>
+</div>
+<div class="hud-frame" aria-hidden="true"></div>
 
 <div class="readout">
-  <div>SUNDAY OS <b>v1.0</b></div>
-  <div>STATE <b id="rdState">Idle</b></div>
+  <div class="brand-line"><i class="status-dot"></i> SUNDAY <b>AI CORE</b></div>
+  <div>LINK <b>LOCAL / SECURE</b></div>
+  <div>MODE <b id="rdState">Idle</b></div>
   <div class="meter"><i id="rdMeter"></i></div>
-  <div>LEVEL <b id="rdLevel">0</b>%</div>
+  <div>VOICE INPUT <b id="rdLevel">0</b>%</div>
 </div>
 
 <div class="panel top-right">
@@ -107,7 +225,7 @@ body {
 
 <div class="spoken-text" id="spokenText"></div>
 
-<div class="hint-bar">SUNDAY — DRAG TO ROTATE • F12 TO HIDE</div>
+<div class="hint-bar">SUNDAY SYSTEMS ONLINE · DRAG CORE TO ROTATE · F12 TO HIDE</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -115,6 +233,38 @@ body {
   'use strict';
 
   var stage = document.getElementById('stage');
+  if (!window.THREE) {
+    var fallbackPoll = function () {
+      fetch('/state').then(function (response) { return response.json(); }).then(function (data) {
+        document.body.classList.toggle('hunter', data.palette === 'red');
+        document.documentElement.style.setProperty('--accent', {
+          amber: '#ff9a2e', cyan: '#42d9ff', violet: '#c56aff', red: '#ff3434'
+        }[data.palette] || '#42d9ff');
+        var state = document.getElementById('rdState');
+        var cpu = document.getElementById('rdCpu');
+        var ram = document.getElementById('rdRam');
+        var spoken = document.getElementById('spokenText');
+        if (state) state.textContent = data.state || 'Idle';
+        if (cpu) cpu.textContent = (data.cpu || 0) + '%';
+        if (ram) ram.textContent = (data.ram || 0) + '%';
+        if (spoken) {
+          spoken.textContent = data.text || '';
+          spoken.classList.toggle('show', Boolean(data.text));
+        }
+      }).catch(function () {});
+      setTimeout(fallbackPoll, 1000);
+    };
+    fallbackPoll();
+    setInterval(function () {
+      var now = new Date();
+      var time = document.getElementById('rdTime');
+      var date = document.getElementById('rdDate');
+      if (time) time.textContent = now.toLocaleTimeString([], { hour12: false });
+      if (date) date.textContent = now.toLocaleDateString([], { weekday: 'short', month: 'short', day: '2-digit' });
+    }, 1000);
+    return;
+  }
+
   var renderer = new THREE.WebGLRenderer({ antialias: true });
   var PR = Math.min(window.devicePixelRatio || 1, 2);
   renderer.setPixelRatio(PR);
@@ -326,7 +476,7 @@ body {
     var css = 'rgb(' + Math.round(c.r * 255) + ',' + Math.round(c.g * 255) + ',' + Math.round(c.b * 255) + ')';
     document.documentElement.style.setProperty('--accent', css);
   }
-  applyPalette('amber');
+  applyPalette('cyan');
 
   var state = 'idle';
   var level = 0, targetLevel = 0, externalLevel = null;
@@ -390,7 +540,7 @@ body {
   var spokenTextEl = document.getElementById('spokenText');
   var lastState = 'idle';
   var lastText = '';
-  var lastPalette = 'amber';
+  var lastPalette = 'cyan';
 
   function pollSunday() {
     fetch('/state')
