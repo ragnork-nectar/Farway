@@ -114,16 +114,74 @@ hud_hidden = False
 HUNTER_MODE = False
 TEXT_COMMAND_QUEUE = queue.Queue()
 TERMINAL_INPUT_READY = threading.Event()
+VOICE_PERMISSION_READY = threading.Event()
 PENDING_PERMISSION_LOCK = threading.Lock()
 PENDING_PERMISSION = None
 TERMINAL_CWD = ROOT_DIR
 
 
-def request_permission(action):
-    """Ask for explicit approval in the same terminal used for commands."""
+def _permission_answer(text):
+    normalized = re.sub(r"[^a-z\s]", "", text.lower()).strip()
+    if normalized in {"yes", "yeah", "yep", "haan", "han", "ha", "ji", "allow", "approve"}:
+        return True
+    if normalized in {"no", "nope", "nah", "nahi", "nahin", "nhi", "deny", "reject"}:
+        return False
+    return None
+
+
+def _resolve_pending_permission(approved):
     global PENDING_PERMISSION
-    if not TERMINAL_INPUT_READY.is_set():
-        print(f"[Permission] Refused because terminal input is unavailable: {action}")
+    if approved is None:
+        return False
+    with PENDING_PERMISSION_LOCK:
+        pending = PENDING_PERMISSION
+        if pending is None:
+            return False
+        response, completed = pending
+        response["approved"] = approved
+        PENDING_PERMISSION = None
+        completed.set()
+    print("[Permission] Approved." if approved else "[Permission] Denied.")
+    return True
+
+
+def _listen_for_permission_voice(completed, timeout):
+    deadline = time.monotonic() + timeout
+    try:
+        recognizer = sr.Recognizer()
+        with sr.Microphone() as source:
+            while not completed.is_set() and time.monotonic() < deadline:
+                try:
+                    audio = recognizer.listen(source, timeout=1, phrase_time_limit=4)
+                except sr.WaitTimeoutError:
+                    continue
+                try:
+                    answer_text = recognizer.recognize_google(audio, language="en-IN")
+                except sr.UnknownValueError:
+                    continue
+                except sr.RequestError:
+                    print("[Permission] Voice recognition unavailable; terminal yes/no abhi bhi kaam karega.")
+                    break
+
+                answer = _permission_answer(answer_text)
+                if answer is not None:
+                    _resolve_pending_permission(answer)
+                    return
+    except Exception as exc:
+        print(f"[Permission] Voice input unavailable ({type(exc).__name__}); terminal yes/no abhi bhi available hai.")
+
+    while not completed.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        completed.wait(timeout=min(1, remaining))
+
+
+def request_permission(action):
+    """Ask for approval by voice or terminal; reject if neither input is available."""
+    global PENDING_PERMISSION
+    if not TERMINAL_INPUT_READY.is_set() and not VOICE_PERMISSION_READY.is_set():
+        print(f"[Permission] Refused because voice and terminal input are unavailable: {action}")
         return False
 
     response = {"approved": False}
@@ -135,11 +193,23 @@ def request_permission(action):
         PENDING_PERMISSION = (response, completed)
 
     print(f"\n[Permission] Sunday wants to: {action}")
-    print("Terminal mein yes/no type karke Enter dabayein (default: no).")
-    if not completed.wait(timeout=120):
+    prompt = (
+        f"{action}. Kya aap permission dete hain? "
+        "Haan ya nahi boliye, ya terminal mein yes/no type kijiye."
+    )
+    speak(prompt)
+    timed_out = False
+    try:
+        _listen_for_permission_voice(completed, timeout=120)
+    finally:
         with PENDING_PERMISSION_LOCK:
-            PENDING_PERMISSION = None
+            if PENDING_PERMISSION is not None and PENDING_PERMISSION[1] is completed:
+                timed_out = not completed.is_set()
+                PENDING_PERMISSION = None
+                completed.set()
+    if timed_out:
         print("[Permission] Timed out; action cancelled.")
+    speak("Permission mil gayi." if response["approved"] else "Permission nahi mili; action cancel kar diya.")
     return response["approved"]
 
 
@@ -165,14 +235,11 @@ def _terminal_input_loop():
             return
 
         with PENDING_PERMISSION_LOCK:
-            pending = PENDING_PERMISSION
-            if pending is not None:
-                response, completed = pending
-                response["approved"] = line.lower() in ("y", "yes")
-                PENDING_PERMISSION = None
-                completed.set()
-                print("[Permission] Approved." if response["approved"] else "[Permission] Denied.")
-                continue
+            permission_pending = PENDING_PERMISSION is not None
+        if permission_pending:
+            answer = _permission_answer(line)
+            _resolve_pending_permission(answer if answer is not None else False)
+            continue
 
         if line:
             TEXT_COMMAND_QUEUE.put(line)
@@ -2201,6 +2268,7 @@ def main():
         recognizer.adjust_for_ambient_noise(source, duration=2)
         print(f"[Sunday] Energy threshold: {recognizer.energy_threshold}")
 
+    VOICE_PERMISSION_READY.set()
     print("\n😴 SLEEP MODE — Say 'Wake up Sunday'")
     print("💬 Say 'Thanks' / 'Who is your owner' → offline reply")
     print("🎯 Say 'Sunday hunter' → PRO Hunter Mode (RED HUD)")
@@ -2309,6 +2377,7 @@ def main():
             print(f"[Sunday] Command process nahi ho saka ({type(e).__name__}).")
             continue
 
+    VOICE_PERMISSION_READY.clear()
     print("\n🚪 Sunday stopped.\n")
 
     try:

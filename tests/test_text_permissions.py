@@ -3,7 +3,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import sunday
 
@@ -26,6 +26,59 @@ class PermissionTests(unittest.TestCase):
         self.assertTrue(response["approved"])
         self.assertTrue(completed.is_set())
         self.assertIsNone(sunday.PENDING_PERMISSION)
+
+    def test_voice_permission_reply_resolves_pending_action(self):
+        response = {"approved": False}
+        completed = sunday.threading.Event()
+        with patch.object(sunday, "PENDING_PERMISSION", (response, completed)):
+            self.assertTrue(sunday._resolve_pending_permission(
+                sunday._permission_answer("Haan")
+            ))
+
+        self.assertTrue(response["approved"])
+        self.assertTrue(completed.is_set())
+        self.assertIsNone(sunday.PENDING_PERMISSION)
+
+    def test_permission_is_asked_and_answer_is_spoken(self):
+        def answer_by_voice(completed, timeout):
+            self.assertEqual(timeout, 120)
+            self.assertFalse(completed.is_set())
+            self.assertFalse(sunday.PENDING_PERMISSION[0]["approved"])
+            sunday._resolve_pending_permission(True)
+
+        with (
+            patch.object(sunday, "TERMINAL_INPUT_READY") as terminal_ready,
+            patch.object(sunday, "VOICE_PERMISSION_READY") as voice_ready,
+            patch.object(sunday, "speak") as speak,
+            patch.object(sunday, "_listen_for_permission_voice", side_effect=answer_by_voice),
+        ):
+            terminal_ready.is_set.return_value = False
+            voice_ready.is_set.return_value = True
+            approved = sunday.request_permission("PC ko lock karna")
+
+        self.assertTrue(approved)
+        self.assertEqual(speak.call_count, 2)
+        self.assertIn("permission dete hain", speak.call_args_list[0].args[0])
+        self.assertIn("Permission mil gayi", speak.call_args_list[1].args[0])
+
+    def test_voice_listener_accepts_spoken_yes(self):
+        response = {"approved": False}
+        completed = sunday.threading.Event()
+        recognizer = MagicMock()
+        recognizer.listen.return_value = object()
+        recognizer.recognize_google.return_value = "haan"
+        microphone = MagicMock()
+        microphone.__enter__.return_value = object()
+
+        with (
+            patch.object(sunday, "PENDING_PERMISSION", (response, completed)),
+            patch.object(sunday.sr, "Recognizer", return_value=recognizer),
+            patch.object(sunday.sr, "Microphone", return_value=microphone),
+        ):
+            sunday._listen_for_permission_voice(completed, timeout=5)
+
+        self.assertTrue(response["approved"])
+        self.assertTrue(completed.is_set())
 
     def test_shutdown_is_not_scheduled_when_permission_is_denied(self):
         with (
@@ -168,6 +221,7 @@ class PermissionTests(unittest.TestCase):
         with (
             patch("builtins.input", side_effect=["tell me something", EOFError]),
             patch.object(sunday, "TERMINAL_INPUT_READY"),
+            patch.object(sunday, "PENDING_PERMISSION", None),
         ):
             sunday._terminal_input_loop()
 
