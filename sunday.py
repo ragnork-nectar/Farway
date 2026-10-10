@@ -436,6 +436,20 @@ def is_command_like(text):
     return any(kw in t for kw in KNOWN_COMMAND_KEYWORDS)
 
 
+def is_question_like(text):
+    normalized = re.sub(r"[^a-z0-9\s']", " ", text.lower()).strip()
+    question_starters = (
+        "what", "why", "how", "when", "where", "who", "which",
+        "whose", "whom", "can you", "could you", "would you",
+        "tell me", "explain", "kya", "kyun", "kaise", "kab",
+        "kahan", "kahaan", "kaun", "kitna", "kitni", "kitne",
+    )
+    return any(
+        normalized == starter or normalized.startswith(starter + " ")
+        for starter in question_starters
+    )
+
+
 def is_system_noise(text):
     if not text:
         return True
@@ -1141,7 +1155,7 @@ def _create_gemini_client(api_key):
     return genai.Client(api_key=api_key)
 
 
-def _call_gemini(prompt, max_attempts_per_key=2):
+def _call_gemini(prompt, max_attempts_per_key=1):
     global API_KEY_CURSOR
     if not API_KEYS:
         return None
@@ -1153,7 +1167,7 @@ def _call_gemini(prompt, max_attempts_per_key=2):
         except Exception:
             pass
 
-    models_to_try = ["gemini-flash-latest", "gemini-3.8-flash", "gemini-2.5-flash"]
+    models_to_try = ["gemini-2.5-flash", "gemini-flash-latest"]
 
     for api_key in _get_available_keys():
         key_index = API_KEYS.index(api_key)
@@ -1195,8 +1209,8 @@ def _call_gemini(prompt, max_attempts_per_key=2):
                                 pass
                         return text
                     else:
-                        time.sleep(1)
-                        continue
+                        print("[AI]   Empty response; trying next model.")
+                        break
                 except Exception as e:
                     err_lower = str(e).lower()
                     if _is_quota_error(err_lower):
@@ -1207,9 +1221,8 @@ def _call_gemini(prompt, max_attempts_per_key=2):
                         key_exhausted = True
                         break
                     if _is_server_busy(err_lower):
-                        print("[AI]   Server busy, retrying...")
-                        time.sleep(2)
-                        continue
+                        print("[AI]   Server busy; trying next model or key.")
+                        break
                     print(f"[AI] Request failed ({type(e).__name__}); trying next option.")
                     break
 
@@ -1850,7 +1863,7 @@ def process_command(c, from_text=False):
         if is_system_noise(c):
             print(f"[Filter] Ignored likely system audio: '{c}'")
             return
-        if not is_command_like(c):
+        if not is_command_like(c) and not is_question_like(c):
             print(f"[Filter] No command keyword — ignoring: '{c}'")
             return
 
@@ -2210,10 +2223,10 @@ def process_command(c, from_text=False):
         )
         if memory_context:
             prompt += f"\n\nMemory about user:\n{memory_context}\n"
-        prompt += f"\nQuestion: {c}"
+        prompt += f"\nQuestion: {original}"
         raw = _call_gemini(prompt)
         if memory:
-            memory.add_message("user", c)
+            memory.add_message("user", original)
         if raw:
             parts = [p.strip() for p in raw.split(".") if p.strip()]
             short = ". ".join(parts[:2]) + "." if parts else raw[:200]

@@ -114,15 +114,34 @@ class PermissionTests(unittest.TestCase):
 
         speak.assert_called_once_with("I didn't understand that")
 
-    def test_voice_commands_keep_existing_keyword_filter(self):
+    def test_voice_general_question_is_forwarded_to_cloud_with_original_text(self):
+        with (
+            patch.object(sunday, "is_system_noise", return_value=False),
+            patch.object(sunday, "request_permission", return_value=True),
+            patch.object(sunday, "_call_gemini", return_value="Python ek programming language hai.") as call_ai,
+            patch.object(sunday, "speak") as speak,
+            patch.object(sunday, "memory", None),
+            patch.object(sunday, "API_KEYS", ["test-key"]),
+        ):
+            sunday.process_command("What is Python?")
+
+        self.assertIn("Question: What is Python?", call_ai.call_args.args[0])
+        self.assertEqual(speak.call_args_list[-1].args[0], "Python ek programming language hai.")
+
+    def test_voice_commands_keep_keyword_filter_for_non_questions(self):
         with (
             patch.object(sunday, "is_system_noise", return_value=False),
             patch.object(sunday, "is_command_like", return_value=False),
             patch.object(sunday, "speak") as speak,
         ):
-            sunday.process_command("tell me something")
+            sunday.process_command("banana cloud")
 
         speak.assert_not_called()
+
+    def test_common_english_and_hinglish_questions_are_recognized(self):
+        for utterance in ("What is Python?", "Why does it rain?", "Kaise kaam karta hai?"):
+            with self.subTest(utterance=utterance):
+                self.assertTrue(sunday.is_question_like(utterance))
 
     def test_voice_system_audio_is_filtered_before_any_action(self):
         with (
@@ -318,6 +337,38 @@ class PermissionTests(unittest.TestCase):
 
         self.assertNotIn("provider secret diagnostic", output.getvalue())
         self.assertIn("Request failed", output.getvalue())
+
+    def test_gemini_tries_fast_flash_models_without_server_busy_sleep(self):
+        class Models:
+            def __init__(self):
+                self.calls = []
+
+            def generate_content(self, *, model, contents):
+                self.calls.append((model, contents))
+                raise RuntimeError("503 server overloaded")
+
+        models = Models()
+        output = StringIO()
+        with (
+            patch.object(sunday, "API_KEYS", ["key-one"]),
+            patch.object(sunday, "EXHAUSTED_KEYS", set()),
+            patch.object(sunday, "API_KEY_CURSOR", 0),
+            patch.object(sunday, "hud", None),
+            patch.object(sunday, "_create_gemini_client", return_value=type("Client", (), {"models": models})()),
+            patch.object(sunday.time, "sleep") as sleep,
+            redirect_stdout(output),
+        ):
+            result = sunday._call_gemini("prompt")
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            models.calls,
+            [
+                ("gemini-2.5-flash", "prompt"),
+                ("gemini-flash-latest", "prompt"),
+            ],
+        )
+        sleep.assert_not_called()
 
 
 class ApiKeyRotationTests(unittest.TestCase):
