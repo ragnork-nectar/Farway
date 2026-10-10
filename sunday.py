@@ -1,10 +1,11 @@
 """
-Sunday v33 — Full Assistant + Dual HUD + Tab Key Toggle
+Sunday v35 — Full Assistant + Dual HUD + Legal-First Hunter Mode
 ========================================
-- 🎨 Small arc reactor (bottom-right, always-on)
+- 🎨 Small arc reactor (always-on)
 - 🖥️ Fullscreen Cosmos Orb (wake word pe)
 - ⌨️ Tab key → hide/show fullscreen HUD
-- 🛡️ Anti-echo filter (ignores YouTube/system audio)
+- 🎯 Hunter Mode — "Sunday Daspin" (legal terms + scope required)
+- 🛡️ Anti-echo filter
 - 🧠 Memory, code gen, volume, apps, files — all intact
 """
 
@@ -23,7 +24,6 @@ import pyautogui
 import psutil
 from dotenv import load_dotenv
 
-# Keyboard listener for Tab key
 try:
     from pynput import keyboard as pk_keyboard
     PYNPUT_AVAILABLE = True
@@ -33,6 +33,14 @@ except ImportError:
 
 from memory_manager import Memory
 from hud_controller import init_hud
+
+# Hunter mode (legal-first)
+try:
+    import sunday_hunter
+    HUNTER_AVAILABLE = True
+except ImportError as e:
+    HUNTER_AVAILABLE = False
+    print(f"[Setup] Hunter module not available: {e}")
 
 try:
     import pywhatkit
@@ -100,20 +108,43 @@ memory = None
 hud = None
 speaker = None
 kb_listener = None
-hud_hidden = False   # Track fullscreen HUD visibility
+hud_hidden = False
+HUNTER_MODE = False
 
 
 # ============================================================
-# 3) WAKE / SLEEP / EXIT
+# 3) WAKE / HUNTER / SLEEP / EXIT PHRASES
 # ============================================================
 WAKE_PHRASES = [
     "wake up sunday", "hey sunday", "hi sunday", "hello sunday",
     "ok sunday", "sunday suno", "oye sunday", "sunny suno",
 ]
 
+HUNTER_ACTIVATE_PHRASES = [
+    "sunday hunter", "hunter mode on", "activate hunter",
+    "sunday hunter mode", "hunter mode activate",
+    "hunter mode", "start hunter",
+]
+
+HUNTER_DEACTIVATE_PHRASES = [
+    "hunter exit", "hunter mode off", "sunday normal",
+    "back to normal", "hunter band karo", "normal mode",
+    "exit hunter", "stop hunter",
+]
+
 def is_wake(text):
     t = text.lower().strip()
     return any(p in t for p in WAKE_PHRASES)
+
+
+def is_hunter_activate(text):
+    t = text.lower().strip()
+    return any(p in t for p in HUNTER_ACTIVATE_PHRASES)
+
+
+def is_hunter_deactivate(text):
+    t = text.lower().strip()
+    return any(p in t for p in HUNTER_DEACTIVATE_PHRASES)
 
 
 def is_exit(text):
@@ -161,20 +192,33 @@ def is_stop_command(text):
 # 4) ANTI-ECHO FILTER
 # ============================================================
 KNOWN_COMMAND_KEYWORDS = [
+    # System
     "open", "khol", "launch", "start", "chalu", "close", "band",
     "volume", "awaaz", "aawaz", "sound", "mute", "unmute",
     "screenshot", "screen shot", "lock", "shutdown", "restart", "reboot",
     "sleep pc", "cancel",
+    # Media
     "play", "baja", "sunao", "gaana", "song", "pause", "resume",
     "next", "previous", "prev", "pichla", "stop music",
+    # Files / Code
     "file", "folder", "code", "make", "create", "write", "likh",
     "read", "delete", "run", "fix", "debug", "improve",
     "calculator", "website", "program", "script",
+    # Memory
     "name", "mera naam", "remember", "yaad", "forget", "bhool",
     "know about me",
+    # Info
     "time", "date", "samay", "tareekh",
+    # Sleep / Exit
     "bye", "goodbye", "good bye", "sleep",
+    # Stop
     "stop", "chup", "ruk",
+    # Hunter
+    "hunter", "scope", "dns", "port scan", "subdomain",
+    "http header", "robots", "ssl", "whois", "tech detect",
+    "save finding", "show findings", "clear findings",
+    "accept terms", "legal terms", "audit log",
+    "remove from scope", "remove scope",
 ]
 
 SYSTEM_AUDIO_NOISE = [
@@ -228,6 +272,7 @@ APPS = {
     "store": "ms-windows-store:", "photoshop": "photoshop",
     "notion": "notion", "obsidian": "obsidian",
     "docker": "docker", "postman": "postman",
+    "burp": "burp", "burpsuite": "burp",
 }
 
 
@@ -337,14 +382,11 @@ def speak(text, allow_stop=False):
 
 
 # ============================================================
-# 7) KEYBOARD LISTENER — Tab to hide/show HUD
+# 7) KEYBOARD LISTENER
 # ============================================================
 def start_keyboard_listener():
-    """Listen for Tab key. Toggle fullscreen HUD visibility."""
     global hud_hidden
-
     if not PYNPUT_AVAILABLE:
-        print("[Keyboard] pynput not available — skipping")
         return None
 
     def on_press(key):
@@ -358,7 +400,7 @@ def start_keyboard_listener():
                         except Exception:
                             pass
                         hud_hidden = True
-                        print("\n[Keyboard] Tab — HUD hidden (Tab again to show)\n")
+                        print("\n[Keyboard] Tab — HUD hidden\n")
                     else:
                         try:
                             hud.show_fullscreen()
@@ -377,13 +419,10 @@ def start_keyboard_listener():
         except Exception:
             pass
 
-    def on_release(key):
-        pass
-
-    listener = pk_keyboard.Listener(on_press=on_press, on_release=on_release)
+    listener = pk_keyboard.Listener(on_press=on_press)
     listener.daemon = True
     listener.start()
-    print("[Keyboard] Tab key listener active — Tab to hide/show HUD")
+    print("[Keyboard] Tab key listener active")
     return listener
 
 
@@ -1141,14 +1180,86 @@ def workflow_run_code(filename):
 
 
 # ============================================================
-# 19) COMMAND HANDLER
+# 19) HUNTER MODE HELPERS (Legal-First)
+# ============================================================
+def enter_hunter_mode():
+    global HUNTER_MODE
+    if not HUNTER_AVAILABLE:
+        return "Hunter module not available. Check sunday_hunter.py"
+
+    HUNTER_MODE = True
+    if hud:
+        try:
+            hud.set_state("thinking")
+            hud.set_text("HUNTER MODE")
+        except Exception:
+            pass
+
+    # Check legal terms acceptance
+    try:
+        if not sunday_hunter.terms_accepted():
+            return (
+                "Hunter mode active — but LEGAL TERMS not accepted. "
+                "Say 'accept terms' to acknowledge: only test targets you own "
+                "or have written permission to test. Unauthorized scanning is illegal."
+            )
+    except Exception:
+        pass
+
+    return "Hunter mode active. Stay legal — only test in-scope targets. Say 'hunter help' for commands."
+
+
+def exit_hunter_mode():
+    global HUNTER_MODE
+    HUNTER_MODE = False
+    if hud:
+        try:
+            hud.set_state("idle")
+            hud.set_text("")
+        except Exception:
+            pass
+    return "Normal mode active."
+
+
+def handle_hunter_mode(text):
+    """Run hunter command. Returns (reply, handled)."""
+    if not HUNTER_AVAILABLE:
+        return "Hunter module not available", True
+    try:
+        reply, handled = sunday_hunter.handle_hunter_command(text)
+        return reply, handled
+    except Exception as e:
+        return f"Hunter error: {e}", True
+
+
+# ============================================================
+# 20) COMMAND HANDLER
 # ============================================================
 def process_command(c):
+    global HUNTER_MODE
+
     c = c.lower().strip()
     original = c
     print(f"[You] {original}")
     words = c.split()
 
+    # ---- HUNTER mode: try hunter commands first ----
+    if HUNTER_MODE:
+        # Hunter deactivate
+        if is_hunter_deactivate(c):
+            reply = exit_hunter_mode()
+            speak(reply)
+            return
+
+        # Try hunter command
+        reply, handled = handle_hunter_mode(c)
+        if handled:
+            speak(reply)
+            return
+
+        # Fall through to normal processing if not a hunter command
+
+    # Anti-echo filter
     if is_system_noise(c):
         print(f"[Filter] Ignored system audio: '{c}'")
         return
@@ -1477,20 +1588,18 @@ def process_command(c):
 
 
 # ============================================================
-# 20) MAIN ENTRY
+# 21) MAIN ENTRY
 # ============================================================
 def main():
-    global memory, hud, kb_listener
+    global memory, hud, kb_listener, HUNTER_MODE
 
     print("\n" + "=" * 60)
-    print("  Sunday — v33 (Tab Key Toggle + Anti-Echo)")
+    print("  Sunday — v35 (Dual HUD + Legal-First Hunter)")
     print("=" * 60)
 
     memory = Memory()
     init_speaker()
     hud = init_hud(enabled=True, fullscreen=True)
-
-    # Start Tab key listener
     kb_listener = start_keyboard_listener()
 
     speak("Sunday is ready. Say wake up Sunday to activate me.")
@@ -1498,6 +1607,7 @@ def main():
     print("=" * 60)
     print(f"[Sunday] API keys: {len(API_KEYS)}")
     print(f"[Sunday] HUD: {'enabled' if hud and hud.enabled else 'disabled'}")
+    print(f"[Sunday] Hunter: {'available' if HUNTER_AVAILABLE else 'unavailable'}")
 
     current_name = memory.get_profile("name")
     if current_name:
@@ -1519,10 +1629,10 @@ def main():
         print(f"[Sunday] Energy threshold: {recognizer.energy_threshold}")
 
     print("\n😴 SLEEP MODE — Say 'Wake up Sunday'")
-    print("⌨️  Tab key → hide/show fullscreen HUD")
+    print("🎯 Say 'Sunday Daspin' → Hunter Mode (legal-first)")
+    print("⌨️  Tab → hide/show HUD")
     print("👋 Say 'Bye Sunday' → sleep")
-    print("🚪 Say 'Goodbye' → exit")
-    print("🛡️  Anti-echo filter: ON\n")
+    print("🚪 Say 'Goodbye' → exit\n")
 
     mode = "sleep"
 
@@ -1573,7 +1683,6 @@ def main():
                             hud.show_fullscreen()
                         except Exception:
                             pass
-                    # Reset hidden flag when we explicitly show
                     globals()['hud_hidden'] = False
                     name = memory.get_profile("name") if memory else None
                     if name:
@@ -1593,6 +1702,7 @@ def main():
                             pass
                     print("\n🚪 Sunday exiting...\n")
                     break
+
                 if is_sleep(text):
                     speak("Okay, going back to sleep")
                     if hud:
@@ -1603,6 +1713,14 @@ def main():
                     mode = "sleep"
                     print("\n😴 SLEEP MODE\n")
                     continue
+
+                # HUNTER MODE ACTIVATION
+                if is_hunter_activate(text):
+                    reply = enter_hunter_mode()
+                    speak(reply)
+                    print("\n🎯 HUNTER MODE ACTIVE\n")
+                    continue
+
                 process_command(text)
 
         except sr.WaitTimeoutError:
@@ -1621,7 +1739,6 @@ def main():
 
     print("\n🚪 Sunday stopped.\n")
 
-    # Cleanup
     try:
         if kb_listener:
             try:
